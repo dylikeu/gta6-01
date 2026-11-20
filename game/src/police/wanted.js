@@ -1,56 +1,51 @@
-// police/wanted.js — the wanted level: heat from crimes, stars, and cooling off.
-// 0 stars: free. 1: a patrol car. 5: the whole Velmara PD is on you.
-
-import { S } from '../core/state.js';
+// Wanted level rules for VELMARA (0–5 stars).
+// Stars rise with crimes, fall when the player stays unseen; at 3+ stars
+// the VPD sets roadblocks, at 5 a helicopter shadow circles overhead.
 import { clamp } from '../core/math.js';
-import { showNotice } from '../core/state.js';
+import { showBanner } from '../core/state.js';
 
-const HEAT_PER_STAR = 20;
+export const WANTED_LABELS = [
+  'Clean', 'Suspicious', 'Wanted', 'Dangerous', 'Most Wanted', 'Citywide Manhunt',
+];
 
-export function wantedStars() {
-  return S.wanted;
+export function wantedLabel(stars) { return WANTED_LABELS[clamp(stars, 0, 5)]; }
+
+// How many police units the heat calls for.
+export function policeBudget(stars) {
+  return [0, 1, 2, 3, 4, 5][clamp(stars, 0, 5)];
 }
 
-export function addWanted(stars, reason) {
-  const before = S.wanted;
-  S.heat = clamp(S.heat + stars * HEAT_PER_STAR, 0, 100);
-  // Ceil, not floor: one star of heat is one star on the HUD until it fully cools.
-  S.wanted = S.heat <= 0 ? 0 : clamp(Math.ceil(S.heat / HEAT_PER_STAR), 1, 5);
-  if (S.wanted > before) {
-    showNotice('WANTED: ' + S.wanted + ' star' + (S.wanted > 1 ? 's' : '') + (reason ? ' — ' + reason : ''));
+export function roadblocksActive(stars) { return stars >= 3; }
+
+export function raiseWanted(state, stars, why) {
+  const p = state.player;
+  const before = p.wanted;
+  p.wanted = clamp(p.wanted + stars, 0, 5);
+  p.heat = 100;
+  if (p.wanted > before) {
+    showBanner(state, 'WANTED — ' + p.wanted + (p.wanted === 1 ? ' STAR' : ' STARS'), wantedLabel(p.wanted), 2.5);
+    state.log.push('wanted ' + before + ' -> ' + p.wanted + ' (' + (why || 'crime') + ')');
   }
+  return p.wanted;
 }
 
-export function clearWanted() {
-  S.wanted = 0;
-  S.heat = 0;
+export function clearWanted(state, why) {
+  state.player.wanted = 0;
+  state.player.heat = 0;
+  state.log.push('wanted cleared (' + (why || 'paid off') + ')');
 }
 
-// Heat cools when the player stays out of trouble and out of sight.
-export function updateWanted(dt) {
-  if (S.shotMode) return; // staged screenshots keep their stars lit
-  const p = S.player;
-  if (S.wanted === 0) { S.heat = 0; return; }
-  // Being seen by police keeps the heat up; hiding cools it faster.
-  let nearCop = false;
-  for (const c of S.copCars) {
-    if (Math.hypot(c.x - p.x, c.y - p.y) < 420) { nearCop = true; break; }
-  }
-  if (!nearCop) {
-    for (const cop of S.cops) {
-      if (Math.hypot(cop.x - p.x, cop.y - p.y) < 320) { nearCop = true; break; }
-    }
-  }
-  const cool = nearCop ? 1.1 : 3.2;
-  S.heat = Math.max(0, S.heat - cool * dt);
-  const stars = S.heat <= 0 ? 0 : clamp(Math.ceil(S.heat / HEAT_PER_STAR), 1, 5);
-  if (stars < S.wanted) {
-    S.wanted = stars;
-    if (stars === 0) showNotice('You lost the heat. The VPD moved on.');
-  }
+// Bribing a fixer contact costs cash and drops one star.
+export function bribeCost(stars) { return stars * 150; }
+export function canBribe(state) {
+  return state.player.wanted > 0 && state.player.money >= bribeCost(state.player.wanted);
 }
-
-export function policeBudget() {
-  // How many police units the current wanted level calls for.
-  return [0, 1, 2, 3, 4, 5][S.wanted];
+export function bribe(state) {
+  const cost = bribeCost(state.player.wanted);
+  if (state.player.money < cost || state.player.wanted === 0) return false;
+  state.player.money -= cost;
+  state.player.wanted -= 1;
+  state.player.heat = state.player.wanted > 0 ? 60 : 0;
+  showBanner(state, 'HEAT PAID DOWN', 'Mara smoothed things over — $' + cost, 2.5);
+  return true;
 }
