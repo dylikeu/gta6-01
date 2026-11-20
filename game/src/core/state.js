@@ -1,117 +1,95 @@
-// core/state.js — the single shared game state for VELMARA.
-// Every system reads and writes this one object; nothing else holds game truth.
-// main.js owns the loop and calls resetState() when a new game starts.
+// Shared game state for VELMARA: one plain object created fresh per run.
+// Everything the systems need lives here so main.js can wire them up
+// without globals, and the self-test can build a state and poke it.
+import { makeRng } from './math.js';
 
-import { mulberry32 } from './math.js';
-
-export const WORLD = 3200; // world is a square, WORLD x WORLD pixels
+export const WORLD_W = 3400;
+export const WORLD_H = 2600;
+export const VIEW_W = 1280;
+export const VIEW_H = 800;
 
 export const RANKS = [
-  { at: 0, name: 'Rookie' },
-  { at: 500, name: 'Wheelman' },
-  { at: 1500, name: 'Hustler' },
-  { at: 3000, name: 'Street King' },
-  { at: 6000, name: 'Kingpin of Velmara' },
+  { at: 0, name: 'Wheelman' },
+  { at: 800, name: 'Street Runner' },
+  { at: 2500, name: 'Wheel Boss' },
+  { at: 6000, name: 'Sunset King' },
+  { at: 12000, name: 'King of the Sun' },
 ];
 
-export function rankFor(earned) {
-  let name = RANKS[0].name;
-  for (const r of RANKS) if (earned >= r.at) name = r.name;
-  return name;
+export function rankFor(cash) {
+  let rank = RANKS[0];
+  for (const r of RANKS) if (cash >= r.at) rank = r;
+  return rank;
 }
 
-export const S = {
-  mode: 'title', // title | playing | paused | busted | finished
-  time: 0,
-  rng: mulberry32(1),
-  seed: 1,
-  camera: { x: 1600, y: 1600, zoom: 1 },
-  keys: {},
-  mouse: { x: 0, y: 0, down: false, clicked: false },
-  player: null,
-  car: null, // the car the player is currently driving (null on foot)
-  cars: [], // traffic + parked + mission cars
-  peds: [],
-  cops: [], // foot police
-  copCars: [], // police cars
-  bullets: [],
-  enemies: [],
-  pickups: [],
-  particles: [],
-  floaters: [], // floating score text
-  wanted: 0, // 0..5 stars
-  heat: 0, // 0..100, drives wanted changes and decay
-  bustedTimer: 0,
-  missionIndex: -1, // -1 = no mission active, 0..5 story missions
-  missionStage: 0,
-  missionTimer: 0,
-  missionMarker: null, // {x, y, label}
-  missionDone: [], // completed mission ids
-  dialog: null, // {lines:[{who,text}], idx} or null
-  banner: null, // {title, sub, t} big center announcement
-  notice: null, // {text, t} small toast under the objective
-  stats: { carsStolen: 0, pedsHit: 0, shotsFired: 0, kills: 0, missions: 0 },
-  pausedByDialog: false,
-  shotMode: null, // 'chase' | 'foot' | 'mission' | 'combat' when staging a screenshot
-  testMode: false,
-  muted: false,
-};
-
-export function freshPlayer() {
+export function createState(seed) {
   return {
-    x: 620, y: 620, angle: -Math.PI / 2, speed: 0,
-    health: 100, maxHealth: 100,
-    money: 40, earned: 0,
-    ammo: 12, reserve: 48, magSize: 12,
-    onFoot: true, walkSpeed: 185,
-    shootCd: 0, hurtCd: 0, interactCd: 0,
+    seed: seed || 7,
+    rng: makeRng(seed || 7),
+    time: 0,            // seconds since run started
+    dayT: 0.32,         // 0..1 time of day (0.32 = late afternoon sun)
+    paused: false,
+    started: false,     // past the title screen
+    gameOver: false,
+    busted: false,
+    muted: false,
+    // Player
+    player: {
+      x: 1700, y: 1500, angle: -Math.PI / 2, speed: 0,
+      onFoot: true, car: null, health: 100, money: 250,
+      ammo: 24, reserveAmmo: 96, wanted: 0, heat: 0,
+      sprint: false, moving: false, punchCd: 0, shootCd: 0,
+      invuln: 0, dead: false,
+    },
+    camera: { x: 1700, y: 1500, zoom: 1 },
+    // World content (filled by city/map.js + city/traffic.js)
+    city: null,
+    cars: [],           // traffic + parked + police cars
+    peds: [],
+    cops: [],           // police on foot
+    bullets: [],
+    pickups: [],
+    particles: [],
+    floaters: [],       // floating text popups
+    // Missions
+    missionIndex: 0,
+    mission: null,      // active mission runtime object
+    missionDone: [false, false, false, false, false, false],
+    dialogue: null,     // {who, text, t, dur}
+    banner: null,       // {title, sub, t, dur}
+    objective: 'Meet Mara at the gold marker',
+    // Stats
+    stats: { carsStolen: 0, copsDodged: 0, missionsDone: 0, shotsFired: 0, cashEarned: 0 },
+    // Input (filled by main.js)
+    keys: {},
+    mouse: { x: VIEW_W / 2, y: VIEW_H / 2, down: false, clicked: false },
+    // Test / shot hooks
+    testMode: false,
+    testResults: [],
+    shotMode: null,
+    log: [],
   };
 }
 
-export function resetState(seed) {
-  S.mode = 'playing';
-  S.time = 0;
-  S.seed = seed || 1;
-  S.rng = mulberry32(S.seed);
-  S.camera = { x: 620, y: 620, zoom: 1 };
-  S.keys = {};
-  S.mouse = { x: 0, y: 0, down: false, clicked: false };
-  S.player = freshPlayer();
-  S.car = null;
-  S.cars = [];
-  S.peds = [];
-  S.cops = [];
-  S.copCars = [];
-  S.bullets = [];
-  S.enemies = [];
-  S.pickups = [];
-  S.particles = [];
-  S.floaters = [];
-  S.wanted = 0;
-  S.heat = 0;
-  S.bustedTimer = 0;
-  S.missionIndex = -1;
-  S.missionStage = 0;
-  S.missionTimer = 0;
-  S.missionMarker = null;
-  S.missionDone = [];
-  S.dialog = null;
-  S.banner = null;
-  S.notice = null;
-  S.stats = { carsStolen: 0, pedsHit: 0, shotsFired: 0, kills: 0, missions: 0 };
-  S.pausedByDialog = false;
-  return S;
+export function addCash(state, amount, why) {
+  state.player.money += amount;
+  if (amount > 0) state.stats.cashEarned += amount;
+  state.floaters.push({ x: state.player.x, y: state.player.y - 30, text: (amount > 0 ? '+' : '') + '$' + amount, color: amount > 0 ? '#7dff8a' : '#ff7d7d', t: 0, dur: 1.6 });
+  if (why) state.log.push(why + ' $' + amount);
 }
 
-export function addMoney(n) {
-  S.player.money += n;
-  S.player.earned += n;
+export function showBanner(state, title, sub, dur) {
+  state.banner = { title, sub: sub || '', t: 0, dur: dur || 3 };
 }
 
-export function showBanner(title, sub) {
-  S.banner = { title, sub: sub || '', t: 3.2 };
+export function say(state, who, text, dur) {
+  state.dialogue = { who, text, t: 0, dur: dur || 4.5 };
 }
 
-export function showNotice(text) {
-  S.notice = { text, t: 3.0 };
+export function addParticles(state, x, y, color, n, speed) {
+  for (let i = 0; i < n; i++) {
+    const a = state.rng() * Math.PI * 2;
+    const s = (speed || 120) * (0.4 + state.rng() * 0.8);
+    state.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, color, t: 0, dur: 0.5 + state.rng() * 0.5, size: 2 + state.rng() * 3 });
+  }
 }
