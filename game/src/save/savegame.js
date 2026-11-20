@@ -1,69 +1,43 @@
-// save/savegame.js — save and load through localStorage. Progress (money, rank,
-// completed jobs, player position) survives a reload; nothing leaves the browser.
-
-import { S, resetState } from '../core/state.js';
-
+// localStorage save / load for VELMARA.
 const KEY = 'velmara-save-v1';
 
-export function hasSave() {
+export function saveGame(state) {
   try {
-    return !!window.localStorage.getItem(KEY);
-  } catch (e) {
-    return false;
-  }
-}
-
-export function saveGame() {
-  const p = S.player;
-  if (!p) return false;
-  const data = {
-    v: 1,
-    money: Math.floor(p.money),
-    earned: Math.floor(p.earned),
-    health: Math.floor(p.health),
-    ammo: p.ammo,
-    reserve: p.reserve,
-    x: Math.floor(p.x),
-    y: Math.floor(p.y),
-    missionDone: S.missionDone.slice(),
-    stats: { ...S.stats },
-    savedAt: Date.now(),
-  };
-  try {
-    window.localStorage.setItem(KEY, JSON.stringify(data));
+    const p = state.player;
+    const data = {
+      v: 1, money: p.money, health: p.health, ammo: p.ammo, reserveAmmo: p.reserveAmmo,
+      x: p.x, y: p.y, wanted: p.wanted,
+      missionIndex: state.missionIndex, missionDone: state.missionDone,
+      stats: state.stats, savedAt: Date.now(),
+    };
+    localStorage.setItem(KEY, JSON.stringify(data));
     return true;
-  } catch (e) {
-    return false;
-  }
+  } catch (e) { return false; }
 }
 
 export function loadGame() {
-  let data = null;
   try {
-    data = JSON.parse(window.localStorage.getItem(KEY) || 'null');
-  } catch (e) {
-    data = null;
-  }
-  if (!data || data.v !== 1) return false;
-  resetState(1);
-  const p = S.player;
-  p.money = data.money;
-  p.earned = data.earned;
-  p.health = data.health;
-  p.ammo = data.ammo;
-  p.reserve = data.reserve;
-  p.x = data.x;
-  p.y = data.y;
-  S.missionDone = data.missionDone || [];
-  S.stats = { ...S.stats, ...(data.stats || {}) };
-  S.camera.x = p.x;
-  S.camera.y = p.y;
-  S.mode = 'playing';
-  return true;
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    if (!d || d.v !== 1) return null;
+    return d;
+  } catch (e) { return null; }
+}
+
+export function hasSave() { return loadGame() !== null; }
+
+export function applySave(state, d) {
+  const p = state.player;
+  p.money = d.money; p.health = d.health; p.ammo = d.ammo; p.reserveAmmo = d.reserveAmmo;
+  p.x = d.x; p.y = d.y; p.wanted = d.wanted || 0; p.heat = p.wanted > 0 ? 80 : 0;
+  state.missionIndex = d.missionIndex || 0;
+  state.missionDone = d.missionDone || [false, false, false, false, false, false];
+  state.stats = Object.assign(state.stats, d.stats || {});
+  state.camera.x = p.x; state.camera.y = p.y;
+  state.objective = state.missionIndex < 6 ? 'Meet Mara at the gold marker' : 'All missions complete — free roam';
 }
 
 export function clearSave() {
-  try {
-    window.localStorage.removeItem(KEY);
-  } catch (e) { /* storage unavailable */ }
+  try { localStorage.removeItem(KEY); } catch (e) { /* ignore */ }
 }
