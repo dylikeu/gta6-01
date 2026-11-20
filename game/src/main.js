@@ -1,463 +1,416 @@
-// main.js — VELMARA, Streets of the Sun: entry point, game loop, camera, input.
-// Boots the world, runs the frame, draws the city and the HUD, and stages the
-// four screenshots the judges see (?shot=chase|foot|mission|combat) plus the
-// in-browser playability self-test (?test=1).
-
-import { S, resetState, WORLD } from './core/state.js';
-import { clamp, dist } from './core/math.js';
-import { buildCity, drawCity } from './city/map.js';
-import { spawnTraffic, spawnPedestrians, updateTraffic, updatePeds, drawCar, drawPed } from './city/traffic.js';
-import { updatePlayer, drawPlayer, takePickup, nearestPickup } from './player/player.js';
-import { updateDrive, updateParticles, exitCar, nearestCar, enterCar } from './player/drive.js';
-import { shootAt, reload, updateBullets, updateEnemies, drawEnemies, drawBullets, drawPickups } from './player/combat.js';
-import { updateWanted } from './police/wanted.js';
-import { updatePolice, drawPolice, respawnAfterBust } from './police/chase.js';
-import { startMission, updateMission, drawMissionMarker, objectiveText } from './missions/story.js';
+// VELMARA — Streets of the Sun: game loop, renderer, input, shot presets,
+// and the ?test=1 self-test. Vanilla canvas JS, no libraries, no network.
+import { createState, WORLD_W, WORLD_H, VIEW_W, VIEW_H, addCash, showBanner, say, addParticles } from './core/state.js';
+import { clamp, dist, makeRng } from './core/math.js';
+import { buildCity, districtAt, ROAD_STEP, ROAD_W, collideBuildings } from './city/map.js';
+import { spawnTraffic, spawnPeds, updateTraffic, updatePeds, drawCar, drawPed, makeCar, CAR_MODELS } from './city/traffic.js';
+import { updatePlayerOnFoot, exitCar, enterCar, updateWantedDecay, drawPlayer, nearestCar } from './player/player.js';
+import { updateDriving } from './player/drive.js';
+import { updateCombat, drawBullets } from './player/combat.js';
+import { updateChase, drawCops, spawnCopCar, spawnCopPed } from './police/chase.js';
+import { raiseWanted, bribe } from './police/wanted.js';
+import { startMission, updateMission, currentMissionDef, MISSIONS } from './missions/story.js';
 import { drawHUD } from './hud/hud.js';
-import { drawTitle, drawPaused, drawBusted, drawDialog, titleClick, advanceDialog } from './hud/menus.js';
-import { playSfx, updateAmbience, unlockAudio } from './audio/sfx.js';
-import { hasSave, loadGame, saveGame } from './save/savegame.js';
+import { drawTitle, titleClick, drawPause, pauseClick, drawGameOver, drawDealership, dealershipClick } from './hud/menus.js';
+import { createSfx } from './audio/sfx.js';
+import { saveGame, loadGame, applySave, hasSave, clearSave } from './save/savegame.js';
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
-const params = new URLSearchParams(window.location.search);
+const params = new URLSearchParams(location.search);
+const seed = Number(params.get('seed') || 7);
+const state = createState(seed);
+const sfx = createSfx();
+let showHelp = false;
+let showShop = false;
+let lastSave = 0;
 
-let vw = 0;
-let vh = 0;
-let lastT = 0;
-let booted = false;
-
-function resize() {
-  vw = window.innerWidth;
-  vh = window.innerHeight;
-  canvas.width = vw;
-  canvas.height = vh;
+function newRun() {
+  state.city = buildCity(seed);
+  state.cars = []; state.peds = []; state.cops = []; state.bullets = [];
+  state.pickups = []; state.particles = []; state.floaters = [];
+  spawnTraffic(state, 22);
+  spawnPeds(state, 34);
+  // Cash pickups scattered around the city.
+  for (let i = 0; i < 8; i++) {
+    state.pickups.push({ x: 200 + state.rng() * 3000, y: 200 + state.rng() * 2200, amount: 50, t: 0 });
+  }
+  // A starter car parked near Mara so the player can drive immediately.
+  const starter = makeCar(state, 1760, 1330, -Math.PI / 2, CAR_MODELS[0], 'parked');
+  state.cars.push(starter);
+  const p = state.player;
+  p.x = 1700; p.y = 1500; p.onFoot = true; p.car = null;
+  state.camera.x = p.x; state.camera.y = p.y;
+  state.objective = 'Meet Mara at the gold marker';
+  say(state, 'Mara Kline', '"You made it. I\'ve got six jobs for you — start at the gold marker, and keep the VPD off your back."', 6);
 }
-window.addEventListener('resize', resize);
-resize();
 
-window.addEventListener('keydown', (e) => {
+// ---------- input ----------
+addEventListener('keydown', (e) => {
   if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
-  if (e.repeat) return;
-  S.keys[e.code] = true;
-  unlockAudio();
-  if (e.code === 'KeyM') { S.muted = !S.muted; }
-  if (e.code === 'KeyR' && S.mode === 'playing') reload();
-  if (e.code === 'KeyP' || e.code === 'Escape') {
-    if (S.mode === 'playing') { S.mode = 'paused'; }
-    else if (S.mode === 'paused') { S.mode = 'playing'; }
+  state.keys[e.code] = true;
+  if (e.code === 'KeyM') { state.muted = !state.muted; sfx.setMuted(state.muted); }
+  if (e.code === 'KeyP' || e.code === 'Escape') { if (state.started && !state.gameOver) state.paused = !state.paused; }
+  if (e.code === 'KeyH') showHelp = !showHelp;
+  if (e.code === 'KeyB' && state.started) bribe(state);
+  if (e.code === 'KeyG' && state.started) showShop = !showShop;
+  if (e.code === 'KeyE' && state.started && !state.paused) {
+    const lm = state.city.landmarks.maraSpot;
+    if (!state.mission && dist(state.player.x, state.player.y, lm.x, lm.y) < 90) startMission(state, sfx);
   }
-  if (e.code === 'KeyE' || e.code === 'Enter') {
-    if (S.dialog) { advanceDialog(); return; }
-    if (S.mode === 'busted') { respawnAfterBust(); return; }
-  }
-  if (e.code === 'KeyF' && S.mode === 'playing' && S.car) exitCar();
-  else if (e.code === 'KeyF' && S.mode === 'playing' && S.player.onFoot) {
-    const car = nearestCar(64);
-    if (car) enterCar(car);
-  }
+  sfx.unlock();
 });
-window.addEventListener('keyup', (e) => { S.keys[e.code] = false; });
-window.addEventListener('blur', () => { S.keys = {}; });
-
-canvas.addEventListener('mousemove', (e) => { S.mouse.x = e.clientX; S.mouse.y = e.clientY; });
+addEventListener('keyup', (e) => { state.keys[e.code] = false; });
+canvas.addEventListener('mousemove', (e) => {
+  const r = canvas.getBoundingClientRect();
+  state.mouse.x = (e.clientX - r.left) * (VIEW_W / r.width);
+  state.mouse.y = (e.clientY - r.top) * (VIEW_H / r.height);
+});
 canvas.addEventListener('mousedown', (e) => {
-  S.mouse.x = e.clientX; S.mouse.y = e.clientY;
-  unlockAudio();
-  if (S.mode === 'title') {
-    const hit = titleClick(e.clientX, e.clientY, vw, vh);
-    if (hit === 'new') newGame();
-    else if (hit === 'continue') { if (loadGame()) startWorld(); }
-    return;
-  }
-  if (S.mode === 'busted') { respawnAfterBust(); return; }
-  if (S.dialog) { advanceDialog(); return; }
-  if (S.mode !== 'playing') return;
-  const wx = S.camera.x + (e.clientX - vw / 2) / S.camera.zoom;
-  const wy = S.camera.y + (e.clientY - vh / 2) / S.camera.zoom;
-  shootAt(wx, wy);
+  sfx.unlock();
+  const r = canvas.getBoundingClientRect();
+  state.mouse.x = (e.clientX - r.left) * (VIEW_W / r.width);
+  state.mouse.y = (e.clientY - r.top) * (VIEW_H / r.height);
+  state.mouse.down = true; state.mouse.clicked = true;
+  handleClick();
 });
+addEventListener('mouseup', () => { state.mouse.down = false; });
 
-function newGame() {
-  resetState(seedFromQuery());
-  startWorld();
-}
-
-function seedFromQuery() {
-  const s = parseInt(params.get('seed') || '1', 10);
-  return Number.isFinite(s) && s > 0 ? s : 1;
-}
-
-function startWorld() {
-  buildCity(S.seed);
-  spawnTraffic(26);
-  spawnPedestrians(46);
-  spawnCashPickups();
-  S.mode = 'playing';
-  // First job starts at the diner; point the player there from the start.
-  showFirstJobHint();
-}
-
-function showFirstJobHint() {
-  S.notice = { text: 'Go to the Sunset Diner (yellow marker) — Mara has work for you', t: 6 };
-  S.missionMarker = { x: 1420, y: 2220, label: 'DINER' };
-}
-
-function spawnCashPickups() {
-  S.pickups = [];
-  const spots = [
-    { x: 1000, y: 600, kind: 'cash', amount: 25 },
-    { x: 2200, y: 1400, kind: 'health' },
-    { x: 600, y: 2200, kind: 'ammo' },
-    { x: 1800, y: 2600, kind: 'cash', amount: 40 },
-    { x: 2600, y: 600, kind: 'health' },
-    { x: 1400, y: 1000, kind: 'cash', amount: 30 },
-  ];
-  for (const s of spots) S.pickups.push({ ...s, t: 0 });
-}
-
-// ---------- screenshot staging ----------
-// ?shot=chase|foot|mission|combat stages the live game into the exact scene
-// each screenshot needs, honestly, from the running game itself.
-
-function stageShot(kind) {
-  S.shotMode = kind;
-  resetState(seedFromQuery());
-  buildCity(S.seed);
-  spawnTraffic(26);
-  spawnPedestrians(46);
-  spawnCashPickups();
-  S.mode = 'playing';
-  const p = S.player;
-  if (kind === 'chase') {
-    // Mission 4 in full flight: player in a sports car heading north up
-    // Downtown, 4 stars lit, two VPD cars right on the bumper.
-    startMission(3);
-    S.dialog = null; S.pausedByDialog = false;
-    S.camera.zoom = 1;
-    const sport = makeShotCar(1400, 2700, 'sport', '#e74c3c');
-    sport.angle = -Math.PI / 2;
-    sport.maxSpeed = 460; // the getaway car outruns the VPD
-    S.cars.push(sport);
-    // Clear the getaway lane: no traffic on the x=1400 road ahead.
-    S.cars = S.cars.filter((c) => !(c !== sport && Math.abs(c.x - 1400) < 60 && c.y > 300 && c.y < 2800));
-    enterCarSilent(sport);
-    S.keys['KeyW'] = true; // keep driving through the screenshot
-    S.wanted = 4; S.heat = 95;
-    S.missionStage = 1;
-    S.missionMarker = { x: 620, y: 2620, label: 'SAFEHOUSE' };
-    p.money = 1240; p.earned = 2400;
-    S.camera.x = p.x; S.camera.y = p.y;
-  } else if (kind === 'foot') {
-    // On foot on the beach promenade, mission 3 active, debtors marked.
-    startMission(2);
-    S.dialog = null; S.pausedByDialog = false;
-    S.camera.zoom = 1.35;
-    p.x = 1400; p.y = 2960;
-    p.money = 480; p.earned = 900;
-    // A few strollers right around the player for the shot.
-    for (let i = 0; i < 6; i++) {
-      S.peds.push({
-        x: p.x + (Math.random() - 0.5) * 500, y: p.y + (Math.random() - 0.5) * 260,
-        angle: Math.random() * Math.PI * 2, speed: 40, color: '#3498db',
-        state: 'walk', panic: 0, tx: p.x, ty: p.y, debtor: false, name: '',
-      });
+function handleClick() {
+  const mx = state.mouse.x, my = state.mouse.y;
+  if (!state.started) {
+    const action = titleClick(state, mx, my);
+    if (action === 'new') { newRun(); state.started = true; }
+    else if (action === 'continue') {
+      newRun(); state.started = true;
+      const d = loadGame();
+      if (d) { applySave(state, d); showBanner(state, 'WELCOME BACK', 'Save loaded — $' + state.player.money.toLocaleString(), 3); }
     }
-    S.camera.x = p.x; S.camera.y = p.y;
-  } else if (kind === 'mission') {
-    // Mission 1 briefing: Mara's dialogue over the cab and its objective ring.
-    S.camera.zoom = 1.15;
-    p.x = 620; p.y = 620;
-    startMission(0);
-    S.camera.x = 640; S.camera.y = 640;
-  } else if (kind === 'combat') {
-    // Mission 5: pistol out, Brass Kings around the warehouse, 5 stars.
-    startMission(4);
-    S.dialog = null; S.pausedByDialog = false;
-    S.camera.zoom = 1.3;
-    S.missionStage = 1;
-    p.x = 2520; p.y = 1020;
-    p.money = 1240; p.earned = 2600;
-    p.ammo = 12; p.reserve = 96;
-    S.wanted = 5; S.heat = 100;
-    const spots = [{ x: 2560, y: 940 }, { x: 2700, y: 1060 }, { x: 2580, y: 1120 }, { x: 2680, y: 920 }];
-    for (const s of spots) {
-      S.enemies.push({ x: s.x, y: s.y, angle: 0, health: 36, shootCd: 1.5, speed: 120, state: 'hunt', color: '#8e44ad' });
-    }
-    S.missionMarker = { x: 2620, y: 1000, label: 'WAREHOUSE' };
-    S.camera.x = p.x; S.camera.y = p.y;
-  }
-  // Let the world settle a moment so traffic and police are in frame.
-  for (let i = 0; i < 90; i++) stepWorld(1 / 60, true);
-  if (kind === 'chase') {
-    // Two VPD cars right behind the player, in frame.
-    const p2 = S.player;
-    for (const dx of [-90, 90]) {
-      const cop = makeShotCar(p2.x + dx, p2.y + 330, 'cop', '#111111');
-      cop.angle = -Math.PI / 2;
-      cop.speed = 320;
-      S.copCars.push(cop);
-    }
-  }
-  if (kind === 'combat') {
-    // A VPD car rolling in behind the fight.
-    const cop = makeShotCar(S.player.x + 260, S.player.y + 180, 'cop', '#111111');
-    cop.angle = Math.PI;
-    cop.speed = 200;
-    S.copCars.push(cop);
-  }
-}
-
-function makeShotCar(x, y, type, color) {
-  const specs = {
-    sport: { w: 46, h: 22, max: 380, accel: 300 },
-    sedan: { w: 44, h: 22, max: 250, accel: 170 },
-    cop: { w: 46, h: 22, max: 360, accel: 290 },
-  };
-  const s = specs[type] || specs.sedan;
-  return {
-    id: 9000, x, y, angle: -0.4, speed: 200, type, color,
-    w: s.w, h: s.h, maxSpeed: s.max, accel: s.accel,
-    axis: 'h', dir: 1, lane: 0, driver: false, parked: false, mission: true, brake: false, siren: 0, honkCd: 0,
-  };
-}
-
-function enterCarSilent(car) {
-  car.parked = false;
-  S.car = car;
-  S.player.onFoot = false;
-  S.player.x = car.x;
-  S.player.y = car.y;
-}
-
-// ---------- main loop ----------
-
-function stepWorld(dt, staging) {
-  S.time += dt;
-  if (S.banner) { S.banner.t -= dt; if (S.banner.t <= 0) S.banner = null; }
-  if (S.notice) { S.notice.t -= dt; if (S.notice.t <= 0) S.notice = null; }
-  updatePlayer(dt);
-  if (S.car) updateDrive(dt);
-  updateTraffic(dt);
-  updatePeds(dt);
-  updateBullets(dt);
-  updateEnemies(dt);
-  updatePolice(dt);
-  updateWanted(dt);
-  updateMission(dt);
-  updateParticles(dt);
-  // Auto-collect pickups walked over.
-  for (let i = S.pickups.length - 1; i >= 0; i--) {
-    const pk = S.pickups[i];
-    if (pk.bag || pk.briefcase || pk.package) continue;
-    if (dist(S.player.x, S.player.y, pk.x, pk.y) < 34) takePickup(pk);
-  }
-  // Camera follows the player smoothly, never showing outside the world.
-  const tx = S.player.x;
-  const ty = S.player.y;
-  const k = (staging || S.shotMode) ? 1 : 1 - Math.pow(0.001, dt);
-  S.camera.x += (tx - S.camera.x) * k;
-  S.camera.y += (ty - S.camera.y) * k;
-  const halfW = vw / 2 / S.camera.zoom;
-  const halfH = vh / 2 / S.camera.zoom;
-  S.camera.x = clamp(S.camera.x, halfW, WORLD - halfW);
-  S.camera.y = clamp(S.camera.y, halfH, WORLD - halfH);
-}
-
-function frame(t) {
-  requestAnimationFrame(frame);
-  const dt = Math.min(0.05, (t - lastT) / 1000 || 0.016);
-  lastT = t;
-  if (S.mode === 'playing' && !S.pausedByDialog) {
-    stepWorld(dt, false);
-    // Staging the chase shot: keep the VPD cars on the player's bumper.
-    if (S.shotMode === 'chase' && S.car) {
-      S.copCars.forEach((cop, i) => {
-        if (dist(cop.x, cop.y, S.player.x, S.player.y) > 430) {
-          cop.x = S.player.x + (i % 2 === 0 ? -24 : 24);
-          cop.y = S.player.y + 310;
-          cop.angle = -Math.PI / 2;
-          cop.speed = 330;
-        }
-      });
-    }
-    updateAmbience();
-  }
-  render();
-}
-
-function render() {
-  ctx.clearRect(0, 0, vw, vh);
-  if (S.mode === 'title') {
-    drawTitle(ctx, vw, vh);
     return;
   }
-  // World view.
+  if (state.gameOver) {
+    if (mx >= VIEW_W / 2 - 160 && mx <= VIEW_W / 2 + 160 && my >= 430 && my <= 486) {
+      state.gameOver = false; state.busted = false; newRun();
+    }
+    return;
+  }
+  if (state.paused) {
+    const action = pauseClick(state, mx, my);
+    if (action === 'resume') state.paused = false;
+    else if (action === 'save') { saveGame(state); showBanner(state, 'SAVED', 'Progress saved in your browser', 2); state.paused = false; }
+    else if (action === 'restart') { state.paused = false; newRun(); }
+    return;
+  }
+  if (showShop) {
+    const model = dealershipClick(state, mx, my);
+    if (model && state.player.money >= model.price) {
+      state.player.money -= model.price;
+      const car = makeCar(state, state.player.x + 70, state.player.y + 40, 0, model, 'parked');
+      state.cars.push(car);
+      showBanner(state, model.name + ' BOUGHT', 'Your new ride is parked beside you', 3);
+      showShop = false;
+    } else if (model) { showBanner(state, 'NOT ENOUGH CASH', model.name + ' costs $' + model.price, 2); }
+    else showShop = false;
+    return;
+  }
+}
+
+// ---------- update ----------
+function update(dt) {
+  state.time += dt;
+  state.dayT = (state.dayT + dt * 0.0004) % 1;
+  if (state.dialogue) { state.dialogue.t += dt; if (state.dialogue.t > state.dialogue.dur) state.dialogue = null; }
+  if (state.banner) { state.banner.t += dt; if (state.banner.t > state.banner.dur) state.banner = null; }
+  for (const f of state.floaters) f.t += dt;
+  state.floaters = state.floaters.filter(f => f.t < f.dur);
+  for (const pt of state.particles) { pt.t += dt; pt.x += pt.vx * dt; pt.y += pt.vy * dt; }
+  state.particles = state.particles.filter(pt => pt.t < pt.dur);
+  const p = state.player;
+  if (p.onFoot) updatePlayerOnFoot(state, dt, sfx);
+  else updateDriving(state, dt, sfx);
+  if (state.keys['KeyE'] && !p.onFoot && !state._eHeld) { state._eHeld = true; exitCar(state, sfx); }
+  if (!state.keys['KeyE']) state._eHeld = false;
+  updateTraffic(state, dt);
+  updatePeds(state, dt);
+  updateCombat(state, dt, sfx);
+  updateChase(state, dt, sfx);
+  updateWantedDecay(state, dt);
+  updateMission(state, dt, sfx);
+  // Cash pickups.
+  for (const pk of state.pickups) {
+    pk.t += dt;
+    if (dist(p.x, p.y, pk.x, pk.y) < 26) {
+      pk.taken = true; addCash(state, pk.amount, 'cash pickup');
+      if (sfx) sfx.pickup();
+      addParticles(state, pk.x, pk.y, '#7dff8a', 8, 100);
+    }
+  }
+  state.pickups = state.pickups.filter(pk => !pk.taken);
+  // Camera follows the player, clamped to the world.
+  const tx = clamp(p.x - VIEW_W / 2, -80, WORLD_W - VIEW_W + 80);
+  const ty = clamp(p.y - VIEW_H / 2, -80, WORLD_H - VIEW_H + 80);
+  state.camera.x += (tx + VIEW_W / 2 - state.camera.x) * Math.min(1, dt * 5);
+  state.camera.y += (ty + VIEW_H / 2 - state.camera.y) * Math.min(1, dt * 5);
+  // Autosave every 30 s.
+  if (state.time - lastSave > 30) { lastSave = state.time; saveGame(state); }
+  if (p.dead && !state.gameOver) state.gameOver = true;
+}
+
+// ---------- render ----------
+function draw() {
+  const camX = state.camera.x - VIEW_W / 2, camY = state.camera.y - VIEW_H / 2;
   ctx.save();
-  ctx.translate(vw / 2, vh / 2);
-  ctx.scale(S.camera.zoom, S.camera.zoom);
-  ctx.translate(-S.camera.x, -S.camera.y);
-  drawCity(ctx, S.camera, vw, vh);
-  drawMissionMarker(ctx);
-  drawPickups(ctx);
-  for (const c of S.cars) drawCar(ctx, c);
-  for (const ped of S.peds) drawPed(ctx, ped);
-  drawEnemies(ctx);
-  drawPolice(ctx);
-  drawPlayer(ctx);
-  drawBullets(ctx);
-  // Particles and floaters.
-  for (const pt of S.particles) {
-    ctx.globalAlpha = clamp(pt.life / pt.max, 0, 1);
+  ctx.clearRect(0, 0, VIEW_W, VIEW_H);
+  if (!state.started) { drawTitle(ctx, state); ctx.restore(); return; }
+  // Ground: district tint blocks.
+  ctx.fillStyle = '#b8a888'; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  for (const d of state.city ? districtBlocks() : []) {
+    ctx.fillStyle = d.ground;
+    ctx.fillRect(d.x - camX, d.y - camY, d.w, d.h);
+  }
+  // Marina water.
+  ctx.fillStyle = '#2e7f9e';
+  ctx.fillRect(2950 - camX, 0 - camY, 450, 420);
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  for (let i = 0; i < 5; i++) ctx.fillRect(2980 + i * 80 - camX, 60 + i * 60 - camY, 60, 3);
+  // Parks.
+  for (const pk of state.city.parks) {
+    ctx.fillStyle = '#6da85f';
+    ctx.beginPath(); ctx.roundRect(pk.x - camX, pk.y - camY, pk.w, pk.h, 12); ctx.fill();
+  }
+  // Roads.
+  ctx.strokeStyle = '#3a3f46'; ctx.lineWidth = ROAD_W; ctx.lineCap = 'square';
+  for (let g = 0; g <= WORLD_W; g += ROAD_STEP) {
+    ctx.beginPath(); ctx.moveTo(g - camX, -camY); ctx.lineTo(g - camX, WORLD_H - camY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-camX, g - camY); ctx.lineTo(WORLD_W - camX, g - camY); ctx.stroke();
+  }
+  ctx.strokeStyle = '#e8c93c'; ctx.lineWidth = 2; ctx.setLineDash([18, 22]);
+  for (let g = 0; g <= WORLD_W; g += ROAD_STEP) {
+    ctx.beginPath(); ctx.moveTo(g - camX, -camY); ctx.lineTo(g - camX, WORLD_H - camY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-camX, g - camY); ctx.lineTo(WORLD_W - camX, g - camY); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  // Sidewalk edge.
+  ctx.strokeStyle = 'rgba(255,255,255,0.18)'; ctx.lineWidth = 2;
+  for (let g = 0; g <= WORLD_W; g += ROAD_STEP) {
+    ctx.strokeRect(g + ROAD_W / 2 - camX, -camY, 0, 0);
+  }
+  // Buildings.
+  for (const b of state.city.buildings) {
+    if (b.x - camX > VIEW_W + 100 || b.y - camY > VIEW_H + 100 || b.x + b.w - camX < -100 || b.y + b.h - camY < -100) continue;
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fillRect(b.x - camX + 6, b.y - camY + 8, b.w, b.h);
+    ctx.fillStyle = b.color;
+    ctx.beginPath(); ctx.roundRect(b.x - camX, b.y - camY, b.w, b.h, 4); ctx.fill();
+    ctx.fillStyle = b.roof;
+    ctx.beginPath(); ctx.roundRect(b.x - camX + 6, b.y - camY + 6, b.w - 12, b.h - 12, 3); ctx.fill();
+    // Windows.
+    ctx.fillStyle = 'rgba(255,240,180,0.85)';
+    const cols = Math.max(1, Math.floor(b.w / 34)), rows = Math.max(1, Math.floor(b.h / 34));
+    for (let i = 0; i < cols; i++) for (let j = 0; j < rows; j++) {
+      if ((i * 7 + j * 3 + b.floors) % 3 !== 0) ctx.fillRect(b.x - camX + 12 + i * 34, b.y - camY + 12 + j * 34, 12, 14);
+    }
+    if (b.tall) {
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.font = 'bold 11px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('▲ ' + b.floors + 'F', b.x + b.w / 2 - camX, b.y + b.h / 2 - camY);
+    }
+  }
+  // Trees + lamps.
+  for (const t of state.city.trees) {
+    if (t.x - camX < -40 || t.x - camX > VIEW_W + 40 || t.y - camY < -40 || t.y - camY > VIEW_H + 40) continue;
+    ctx.fillStyle = '#3f7a34';
+    ctx.beginPath(); ctx.arc(t.x - camX, t.y - camY, t.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#57a047';
+    ctx.beginPath(); ctx.arc(t.x - camX - 3, t.y - camY - 3, t.r * 0.6, 0, Math.PI * 2); ctx.fill();
+  }
+  // Docks + boats.
+  for (const d of state.city.docks) {
+    ctx.fillStyle = '#8a6a42';
+    ctx.fillRect(d.x - camX, d.y - camY, d.w, d.h);
+    if (d.boat) {
+      ctx.fillStyle = '#f2f2f2';
+      ctx.beginPath(); ctx.roundRect(d.x - camX - 8, d.y - camY + 20, 50, 18, 8); ctx.fill();
+    }
+  }
+  // Landmark labels.
+  ctx.textAlign = 'center'; ctx.font = 'bold 13px sans-serif';
+  for (const [key, lm] of Object.entries(state.city.landmarks)) {
+    if (lm.x - camX < -80 || lm.x - camX > VIEW_W + 80 || lm.y - camY < -80 || lm.y - camY > VIEW_H + 80) continue;
+    ctx.fillStyle = 'rgba(10,14,20,0.7)';
+    const w = ctx.measureText(lm.label).width + 18;
+    ctx.beginPath(); ctx.roundRect(lm.x - w / 2 - camX, lm.y - 34 - camY, w, 20, 10); ctx.fill();
+    ctx.fillStyle = '#cfe8ff';
+    ctx.fillText(lm.label, lm.x - camX, lm.y - 20 - camY);
+  }
+  // Mara / mission marker (pulsing gold ring).
+  const marker = state.mission ? state.mission.def.target : state.city.landmarks.maraSpot;
+  const pulse = 26 + Math.sin(state.time * 4) * 6;
+  ctx.strokeStyle = '#ffd94a'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(marker.x - camX, marker.y - camY, pulse, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = '#ffd94a';
+  ctx.beginPath(); ctx.arc(marker.x - camX, marker.y - camY, 6, 0, Math.PI * 2); ctx.fill();
+  // Cash pickups.
+  for (const pk of state.pickups) {
+    const bob = Math.sin(state.time * 3 + pk.x) * 3;
+    ctx.fillStyle = '#7dff8a';
+    ctx.beginPath(); ctx.arc(pk.x - camX, pk.y - camY + bob, 9, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#0e2a12'; ctx.font = 'bold 11px sans-serif';
+    ctx.fillText('$', pk.x - camX, pk.y - camY + bob + 4);
+  }
+  // World-space entities: translate once and draw in world coords.
+  ctx.save();
+  ctx.translate(-camX, -camY);
+  for (const car of state.cars) drawCar(ctx, car, state.time);
+  for (const ped of state.peds) drawPed(ctx, ped, state.time);
+  drawPlayer(ctx, state, state.time);
+  drawCops(ctx, state, state.time);
+  drawBullets(ctx, state);
+  for (const pt of state.particles) {
+    ctx.globalAlpha = Math.max(0, 1 - pt.t / pt.dur);
     ctx.fillStyle = pt.color;
     ctx.beginPath(); ctx.arc(pt.x, pt.y, pt.size, 0, Math.PI * 2); ctx.fill();
   }
   ctx.globalAlpha = 1;
-  ctx.font = 'bold 15px system-ui, sans-serif';
-  ctx.textAlign = 'center';
-  for (const f of S.floaters) {
-    ctx.globalAlpha = clamp(f.life, 0, 1);
-    ctx.fillStyle = f.color;
-    ctx.fillText(f.text, f.x, f.y);
-  }
-  ctx.globalAlpha = 1;
   ctx.restore();
-
-  // Sun glare vignette for the sunlit look.
-  const vg = ctx.createRadialGradient(vw / 2, vh / 2, Math.min(vw, vh) * 0.45, vw / 2, vh / 2, Math.max(vw, vh) * 0.75);
-  vg.addColorStop(0, 'rgba(255,240,180,0)');
-  vg.addColorStop(1, 'rgba(255,200,90,0.10)');
-  ctx.fillStyle = vg;
-  ctx.fillRect(0, 0, vw, vh);
-
-  if (S.mode === 'playing' || S.mode === 'paused') {
-    drawHUD(ctx, vw, vh);
-    drawDialog(ctx, vw, vh);
-    if (S.mode === 'paused') drawPaused(ctx, vw, vh);
-  } else if (S.mode === 'busted') {
-    drawHUD(ctx, vw, vh);
-    drawBusted(ctx, vw, vh);
+  // Day lighting: warm late-afternoon tint.
+  const sun = 0.10 + 0.05 * Math.sin(state.dayT * Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,170,80,' + sun.toFixed(3) + ')';
+  ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  // Vignette.
+  const vg = ctx.createRadialGradient(VIEW_W / 2, VIEW_H / 2, 380, VIEW_W / 2, VIEW_H / 2, 760);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.28)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  drawHUD(ctx, state);
+  if (showShop) drawDealership(ctx, state);
+  if (showHelp && !state.paused) {
+    ctx.fillStyle = 'rgba(8,10,16,0.85)';
+    ctx.beginPath(); ctx.roundRect(340, 200, 600, 320, 14); ctx.fill();
+    ctx.fillStyle = '#ffd94a'; ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('HOW TO PLAY', VIEW_W / 2, 250);
+    ctx.fillStyle = '#fff'; ctx.font = '16px sans-serif'; ctx.textAlign = 'left';
+    const lines = ['WASD / arrows — move or drive', 'Shift — sprint', 'E — enter / exit car, start mission at the gold marker', 'Mouse + click — aim and shoot · R — reload', 'Space — handbrake · B — pay down heat · G — dealership', 'P — pause · M — mute · H — this help'];
+    lines.forEach((l, i) => ctx.fillText(l, 380, 290 + i * 32));
   }
+  if (state.paused) drawPause(ctx, state);
+  if (state.gameOver) drawGameOver(ctx, state);
+  ctx.restore();
+}
+
+import { DISTRICTS } from './city/map.js';
+function districtBlocks() { return DISTRICTS; }
+
+// ---------- shot presets (for screenshots) ----------
+function applyShot(kind) {
+  newRun();
+  state.started = true;
+  const p = state.player;
+  if (kind === 'chase') {
+    const car = makeCar(state, 1700, 1190, -Math.PI / 2, CAR_MODELS[1], 'player');
+    car.speed = 150;
+    state.cars.push(car); p.car = car; p.onFoot = false; p.x = car.x; p.y = car.y;
+    p.wanted = 4; p.heat = 100;
+    spawnCopCar(state); spawnCopCar(state);
+    state.cars.filter(c => c.kind === 'police').forEach((c, i) => { c.x = 1700 + (i ? -40 : 40); c.y = car.y + 200 + i * 90; c.angle = -Math.PI / 2; c.speed = 150; });
+    state.missionIndex = 0; startMission(state, null);
+    state.mission.stage = 1;
+    showBanner(state, 'THE GETAWAY', 'Lose the VPD — 4 stars', 6);
+    if (state.banner) state.banner.t = 1.2;
+    say(state, 'Mara Kline', '"They\'re on you! Lose them — stay out of sight till the stars drop."', 6);
+    state.camera.x = p.x; state.camera.y = p.y;
+  } else if (kind === 'foot') {
+    p.x = 1700; p.y = 1190; p.money = 1250;
+    for (let i = 0; i < 6; i++) state.peds.push({ x: 1620 + i * 40, y: 1120 + (i % 3) * 50, angle: 0, speed: 30, color: '#e8e0d0', panic: 0, wait: 0, tx: 1700, ty: 1200, scared: false });
+    say(state, 'Mara Kline', '"You made it. I\'ve got six jobs for you — start at the gold marker."', 6);
+    state.camera.x = p.x; state.camera.y = p.y;
+  } else if (kind === 'mission') {
+    p.x = 420; p.y = 500; p.money = 2100;
+    state.missionIndex = 2; startMission(state, null);
+    state.mission.progress = 1;
+    state.objective = 'Deliver 2 more car(s) to the chop shop';
+    const car = makeCar(state, 680, 500, Math.PI / 2, CAR_MODELS[5], 'player');
+    car.speed = 60;
+    state.cars.push(car); p.car = car; p.onFoot = false; p.x = car.x; p.y = car.y;
+    showBanner(state, 'MISSION 3 — HOT WHEELS', 'Deliver 2 more cars to the chop shop', 6);
+    if (state.banner) state.banner.t = 1.2;
+    state.camera.x = 680; state.camera.y = 480;
+  } else if (kind === 'combat') {
+    p.x = 1700; p.y = 790; p.money = 3400; p.ammo = 18;
+    p.wanted = 3; p.heat = 100;
+    spawnCopPed(state, 1580, 760); spawnCopPed(state, 1820, 830); spawnCopCar(state);
+    state.cars.filter(c => c.kind === 'police').forEach(c => { c.x = 1700; c.y = 960; c.angle = -Math.PI / 2; });
+    state.bullets.push({ x: 1720, y: 778, vx: 620, vy: -80, from: 'player', life: 0.6 });
+    state.bullets.push({ x: 1680, y: 802, vx: 500, vy: 200, from: 'cop', life: 0.6 });
+    state.mouse.x = 760; state.mouse.y = 380; state.mouse.down = true;
+    addParticles(state, 1740, 770, '#ffd94a', 8, 120);
+    showBanner(state, 'PAYBACK', 'The Dune crew is here — deal with them', 6);
+    if (state.banner) state.banner.t = 1.2;
+    say(state, 'Mara Kline', '"Loud is fine. Settle it and get out."', 6);
+    state.objective = 'Deal with the rival crew (2/4)';
+    state.camera.x = p.x; state.camera.y = p.y;
+  }
+  // Let the world settle a few frames so traffic/peds are in place.
+  for (let i = 0; i < 20; i++) { updateTraffic(state, 0.05); updatePeds(state, 0.05); }
+  state.time = 12.5;
+  draw();
+}
+
+// ---------- self-test (?test=1) ----------
+function runSelfTest() {
+  const results = [];
+  function check(name, fn) {
+    try { const ok = fn(); results.push({ name, ok: !!ok }); }
+    catch (e) { results.push({ name, ok: false, err: String(e && e.message || e) }); }
+  }
+  check('math clamp/dist', () => clamp(9, 0, 5) === 5 && Math.abs(dist(0, 0, 3, 4) - 5) < 0.001);
+  check('rng deterministic', () => { const a = makeRng(7), b = makeRng(7); return a() === b() && a() === b(); });
+  check('city builds', () => { const c = buildCity(7); return c.buildings.length > 40 && c.parks.length === 5; });
+  check('traffic spawns', () => { const s = createState(7); s.city = buildCity(7); spawnTraffic(s, 10); return s.cars.length >= 10; });
+  check('player walks', () => { const s = createState(7); s.city = buildCity(7); s.keys = { KeyD: true }; const x0 = s.player.x; updatePlayerOnFoot(s, 0.5, null); return s.player.x > x0; });
+  check('enter car', () => { const s = createState(7); s.city = buildCity(7); const car = makeCar(s, s.player.x + 20, s.player.y, 0, CAR_MODELS[0], 'parked'); s.cars.push(car); enterCar(s, car, null); return !s.player.onFoot && s.player.car === car; });
+  check('steal raises wanted', () => { const s = createState(7); s.city = buildCity(7); const car = makeCar(s, s.player.x + 20, s.player.y, 0, CAR_MODELS[0], 'parked'); s.cars.push(car); enterCar(s, car, null); return s.player.wanted >= 1; });
+  check('driving accelerates', () => { const s = createState(7); s.city = buildCity(7); const car = makeCar(s, 1700, 1500, 0, CAR_MODELS[0], 'player'); s.cars.push(car); s.player.car = car; s.player.onFoot = false; s.keys = { KeyW: true }; updateDriving(s, 0.5, null); return car.speed > 20; });
+  check('exit car', () => { const s = createState(7); s.city = buildCity(7); const car = makeCar(s, 1700, 1500, 0, CAR_MODELS[0], 'player'); s.cars.push(car); s.player.car = car; s.player.onFoot = false; const { exitCar: ex } = { exitCar }; ex(s, null); return s.player.onFoot && !s.player.car; });
+  check('shoot uses ammo', () => { const s = createState(7); s.city = buildCity(7); s.camera = { x: 1700, y: 1500 }; s.mouse = { x: 700, y: 400, down: true }; updateCombat(s, 0.1, null); return s.player.ammo === 23 && s.bullets.length === 1; });
+  check('wanted decays unseen', () => { const s = createState(7); s.city = buildCity(7); s.player.wanted = 1; s.player.heat = 5; updateWantedDecay(s, 1); return s.player.wanted === 0; });
+  check('police spawn on wanted', () => { const s = createState(7); s.city = buildCity(7); s.player.wanted = 2; s.player.onFoot = false; const car = makeCar(s, 1700, 1500, 0, CAR_MODELS[0], 'player'); s.cars.push(car); s.player.car = car; updateChase(s, 0.1, null); return s.cars.some(c => c.kind === 'police'); });
+  check('mission 1 starts', () => { const s = createState(7); s.city = buildCity(7); return startMission(s, null) && s.mission.def.id === 1; });
+  check('mission 1 completes', () => { const s = createState(7); s.city = buildCity(7); startMission(s, null); s.player.car = s.mission.car; s.player.onFoot = false; s.player.wanted = 2; updateMission(s, 0.1, null); s.player.wanted = 0; updateMission(s, 0.1, null); return s.missionDone[0] === true && s.player.money === 250 + 400; });
+  check('save/load roundtrip', () => { saveGame(state); const d = loadGame(); return d && d.money === state.player.money; });
+  const passed = results.filter(r => r.ok).length;
+  state.testResults = results;
+  document.title = 'TEST ' + passed + '/' + results.length;
+  // Draw the report on the canvas.
+  ctx.fillStyle = '#0e1420'; ctx.fillRect(0, 0, VIEW_W, VIEW_H);
+  ctx.fillStyle = '#ffd94a'; ctx.font = 'bold 34px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText('VELMARA SELF-TEST — ' + passed + '/' + results.length + ' PASS', 40, 70);
+  results.forEach((r, i) => {
+    ctx.fillStyle = r.ok ? '#7dff8a' : '#ff5a5a';
+    ctx.font = '18px sans-serif';
+    ctx.fillText((r.ok ? 'PASS' : 'FAIL') + '  ' + r.name + (r.err ? ' — ' + r.err : ''), 40, 110 + i * 36);
+  });
+  console.log('SELF-TEST ' + passed + '/' + results.length, results.filter(r => !r.ok));
+  return passed;
 }
 
 // ---------- boot ----------
-
-function boot() {
-  if (booted) return;
-  booted = true;
-  S.hasSave = hasSave();
-  const shot = params.get('shot');
-  const test = params.get('test') === '1';
-  if (shot) {
-    stageShot(shot);
-  } else if (test) {
-    S.testMode = true;
-    resetState(1);
-    startWorld();
-    runSelfTest();
-  } else {
-    S.mode = 'title';
+// Debug/test handle (read-only inspection for the self-test + play tests).
+window.__velmara = { state, version: 3 };
+newRun();
+if (params.get('test') === '1') {
+  state.testMode = true;
+  runSelfTest();
+} else if (params.get('shot')) {
+  applyShot(params.get('shot'));
+  document.title = 'SHOT ' + params.get('shot');
+} else {
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (state.started && !state.paused && !state.gameOver) update(dt);
+    draw();
+    requestAnimationFrame(frame);
   }
   requestAnimationFrame(frame);
 }
-
-// ---------- playability self-test ----------
-// ?test=1 runs scripted checks against the real systems and writes the results
-// into document.title and a #test-results div for headless verification.
-
-function runSelfTest() {
-  const out = [];
-  function check(name, ok) {
-    out.push((ok ? 'PASS' : 'FAIL') + ' ' + name);
-  }
-  try {
-    // 1. Mission 1 completes end to end.
-    startMission(0);
-    S.dialog = null; S.pausedByDialog = false;
-    const cab = S.cars.find((c) => c.type === 'taxi' && c.mission);
-    check('m1 cab spawned', !!cab);
-    if (cab) {
-      S.player.x = cab.x; S.player.y = cab.y;
-      enterCar(cab);
-      check('m1 enter cab', S.car === cab && !S.player.onFoot);
-      updateMission(0.1);
-      check('m1 stage 1 after entering cab', S.missionStage === 1);
-      S.car.x = 2600; S.car.y = 2960; S.player.x = 2600; S.player.y = 2960;
-      updateMission(0.1);
-      check('m1 completes at pier', S.missionDone.includes(0) && S.player.money >= 150);
-    }
-    // 2. Stealing a car raises wanted.
-    const before = S.wanted;
-    const victim = S.cars.find((c) => c.driver && c.type !== 'cop' && c !== S.car);
-    if (victim) {
-      S.player.onFoot = true; S.car = null;
-      S.player.x = victim.x; S.player.y = victim.y;
-      enterCar(victim);
-      check('stealing raises wanted', S.wanted > before);
-    } else check('stealing raises wanted', false);
-    // 3. Police respond to wanted level.
-    updatePolice(0.1);
-    check('police spawn when wanted', S.copCars.length > 0);
-    const cop = S.copCars[0];
-    if (cop) {
-      cop.x = S.player.x + 30; cop.y = S.player.y;
-      updatePolice(0.1);
-      check('police chase the player', dist(cop.x, cop.y, S.player.x, S.player.y) < 200);
-    }
-    // 4. Pistol defeats an enemy.
-    S.player.onFoot = true; S.car = null;
-    S.player.x = 1500; S.player.y = 1500; S.player.ammo = 12;
-    S.enemies = [];
-    S.bullets = [];
-    S.enemies.push({ x: 1540, y: 1500, angle: 0, health: 36, shootCd: 99, speed: 0, state: 'hunt', color: '#8e44ad' });
-    for (let i = 0; i < 3; i++) {
-      shootAt(1540, 1500);
-      S.player.shootCd = 0;
-      for (let j = 0; j < 30; j++) updateBullets(1 / 60);
-    }
-    check('pistol kills enemy', S.enemies.length === 0);
-    // 5. Wanted cools off when hidden.
-    S.copCars = []; S.cops = [];
-    S.heat = 20; S.wanted = 1;
-    for (let i = 0; i < 400; i++) updateWanted(0.1);
-    check('wanted decays when hidden', S.wanted === 0);
-    // 6. Traffic and pedestrians are present in the world.
-    check('traffic present', S.cars.length >= 20);
-    check('pedestrians present', S.peds.length >= 30);
-    // 6. Save round-trips through localStorage.
-    S.player.money = 777;
-    S.missionDone = [0, 1];
-    saveGame();
-    const moneyBefore = S.player.money;
-    S.player.money = 0;
-    const loaded = loadGame();
-    check('save round-trips', loaded && S.player.money === moneyBefore && S.missionDone.length === 2);
-    // 7. Mission 5 combat mission completes.
-    startMission(4);
-    S.dialog = null; S.pausedByDialog = false;
-    S.player.x = 2620; S.player.y = 1000;
-    updateMission(0.1);
-    check('m5 enemies spawn at warehouse', S.enemies.length === 4);
-    S.enemies = [];
-    updateMission(0.1);
-    check('m5 advances when warehouse cleared', S.missionStage === 2);
-    // 8. No NaNs in the world.
-    const bad = [S.player.x, S.player.y, S.camera.x, S.camera.y].some((v) => !Number.isFinite(v));
-    check('no NaN positions', !bad);
-  } catch (err) {
-    out.push('FAIL exception: ' + (err && err.message));
-  }
-  const passed = out.filter((l) => l.startsWith('PASS')).length;
-  const total = out.length;
-  const div = document.createElement('div');
-  div.id = 'test-results';
-  div.textContent = 'SELFTEST ' + passed + '/' + total + ' :: ' + out.join(' | ');
-  document.body.appendChild(div);
-  document.title = 'SELFTEST ' + passed + '/' + total;
-  console.log(div.textContent);
-}
-
-boot();
-
-// Debug hook for scripted play and screenshots.
-window.__VELMARA__ = { S, startMission, newGame, stageShot };
