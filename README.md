@@ -1,69 +1,59 @@
 # SOLARA — Streets of Coral Bay
 
-[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![make.fun · gta6-01 · rank](https://make.fun/badge/gta6-01/dylikeu/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
-[![make.fun · gta6-01 · reward](https://make.fun/badge/gta6-01/dylikeu/gta6-01/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
+[![Make.fun — gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01?ref=ec115nvc)
+[![Rank](https://make.fun/badge/gta6-01/dylikeu/gta6-01/rank.svg)](https://make.fun/bounty/gta6-01?ref=ec115nvc)
+[![Reward](https://make.fun/badge/gta6-01/dylikeu/gta6-01/reward.svg)](https://make.fun/bounty/gta6-01?ref=ec115nvc)
 
-A 3D third-person open-world crime game, built from scratch in Three.js
-(vendored, no network requests) — no assets borrowed from anyone. Drive,
-steal, run, and climb the ranks of Coral Bay, a sun-soaked harbour city
-of nine districts. An entry for the [make.fun](https://make.fun) gta6-01
-bounty ("Make GTA 6").
+An original open-world crime game in the spirit of GTA 6, built for the [gta6-01 bounty](https://make.fun/bounty/gta6-01?ref=ec115nvc) on make.fun. Dante Cruz is back in Coral Bay, a fictional sunset beach city: steal cars, outrun the Coral Bay PD, and take all eight story jobs from Marisol Vega.
 
-## Play
+## Play it
 
-Open `game/index.html` in a desktop browser, or run `node serve.ts` and
-open http://localhost:8080/index.html.
+```sh
+node serve.ts
+# open http://localhost:8080
+```
 
-- **Move** — WASD / arrow keys. **Run** — Shift.
-- **Enter / exit car** — E (near a parked or traffic car).
-- **Drive** — W/S accelerate & brake, A/D steer. **Handbrake** — Space.
-- **Aim** — mouse. **Shoot** — mouse click. **Reload** — R.
-- **Start mission** — walk into the gold marker and press E.
-- **Pause** — P or Esc. **Camera** — drag with the mouse to orbit.
+No build step, no network: the game is static files under `game/`, with a vendored minified three.js build (`game/vendor/three.module.min.js`). It runs in desktop Chrome.
 
-## The city
+## How to play
 
-Nine districts — Coral Pier, Marina Hotel, Sunset Motors, Palm Court,
-Neon Beach Club, Coral Bank, Harbor Docks, Lighthouse Point and Coral
-Plaza — linked by avenues full of traffic (14 cars) and pedestrians.
-Steal a car and the Coral Bay Police respond: a wanted level of 0–5
-stars, patrol cars that chase and ram, roadblocks at high heat, and a
-police helicopter with a searchlight at the top. Lay low out of sight
-and the heat cools off.
+- **WASD** — move on foot / drive · **SHIFT** — sprint
+- **E** — enter or exit a car, advance dialogue
+- **SPACE** or **CLICK** — shoot the pistol (handbrake while driving)
+- **Q** — rob a nearby pedestrian · **R** — reload · **T** — change radio station
+- **M** — start the next job · **P** — pause
 
-## Story — eight missions from Rico, Luna and Mr. Vane
+## What is in the game
 
-1. **Welcome to Coral Bay** — Rico shows Dante the ropes.
-2. **Sunset Courier** — a delivery across town before sundown.
-3. **Hot Wheels** — steal three marked cars for the chop shop.
-4. **Debt Collector** — settle accounts at Palm Court.
-5. **Beach Party Getaway** — lose the cops after the Neon Beach Club.
-6. **The Coral Heist** — the bank job, from Mr. Vane.
-7. **Harbor Heat** — escape the docks under fire.
-8. **King of Coral Bay** — the final job.
-
-Earn cash, climb the ranks, buy better rides, and keep your save in the
-browser (localStorage). The radio plays while you drive; the HUD shows
-wanted stars, cash, health and armour, a minimap, your weapon and speed.
+- A 3D sunset city: Ocean Drive, the beach and the pier, colourful low-poly buildings, palms, traffic and pedestrians
+- Third-person on foot and driving, with cars to steal (parked cars, traffic, even police cruisers)
+- A wanted system (0–5 stars) with patrol cars that chase and ram, and a police helicopter with a searchlight at 3 stars and above
+- Eight story jobs with portrait dialogue: car theft, deliveries, a pickup, a marina shootout, a bank robbery, harbour runs, a 60-second getaway chase, and the final mansion takeover
+- A money economy (jobs, robberies, cash pickups), health and armour, a pistol with reloads
+- A full HUD: wanted stars, money, health/armour bars, weapon slot, radio station and song, mission objective, dialogue box, and a live circular minimap
+- Three generative radio stations, engine and siren sounds, and effects (dust, sparks, smoke, explosions) — all synthesized in the browser
+- A save (money and jobs) in localStorage, with Continue on the menu
 
 ## Layout
 
-- `game/index.html` — page shell, WebGL canvas, HUD chrome
-- `game/src/main.js` — game loop, wiring, shot & test modes
-- `game/src/city.js` — city map, districts, buildings
-- `game/src/player.js` — on-foot movement, driving, combat
-- `game/src/police.js` — wanted level, police chase AI, helicopter
-- `game/src/missions.js` — story missions & dialogue
-- `game/src/traffic.js` — traffic cars & pedestrians
-- `game/src/hud.js` — HUD, minimap, menus, radio
-- `game/src/audio.js` — synthesized WebAudio sound effects
-- `game/src/save.js` — localStorage save & load
-- `game/vendor/three.module.js` — Three.js 0.187.0 (vendored from npm)
-
-`main.ts` hands the entry in: it copies `game/` and `screenshots/` to
-`/output` (or `$MAKEFUN_OUTPUT_DIR`) and writes `dossier.json`.
+- `game/src/main.js` — bootstrap, game loop, state machine, save
+- `game/src/city.js` — Coral Bay: sky, sea, beach, roads, buildings, palms, pier
+- `game/src/vehicles.js` — the car factory and city traffic
+- `game/src/pedestrians.js` — walkers and mission characters
+- `game/src/police.js` — wanted system, patrol cars, helicopter
+- `game/src/player.js` — Dante on foot, enter/exit car
+- `game/src/drive.js` — arcade car physics
+- `game/src/weapons.js` — pistol, robbery, tracers
+- `game/src/missions.js` — the eight story jobs and their dialogue
+- `game/src/hud.js` — HUD, minimap, dialogue, menus
+- `game/src/audio.js` — synth engine, radio and sound effects
+- `game/src/effects.js` — dust, sparks, smoke, explosions, cash pickups
+- `game/src/render.js` — renderer and chase camera
+- `game/src/shots.js` — the four deterministic screenshot scenes
+- `main.ts` — the entry program that hands the game in; `serve.ts` — local server
 
 ## License
 
-MIT — see LICENSE.
+MIT. The city, characters, vehicles, story, art and music are all original — nothing from any commercial game.
+
+[Play the bounty](https://make.fun/bounty/gta6-01?ref=ec115nvc) · Optional: earn referral rewards — [make.fun](https://make.fun/bounty/gta6-01?ref=ec115nvc)
