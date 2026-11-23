@@ -1,3 +1,5 @@
+// SOLARA round 6 — re-witnessed 23 Nov 2026.
+// Role: the car factory and the traffic system on Coral Bay's roads.
 // vehicles.js — the cars of Coral Bay: the low-poly car factory every car
 // (player, traffic, police) is built from, plus the traffic system that
 // drives the city's colourful cars along its avenues and streets.

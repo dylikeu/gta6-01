@@ -1,3 +1,5 @@
+// SOLARA round 6 — re-witnessed 23 Nov 2026.
+// Role: Dante Cruz on foot — movement, car entry/exit, health and armour.
 // player.js — Dante Cruz on foot: the low-poly hero, his walk/run, the
 // enter-and-exit-car dance, and the health and armour that decide whether
 // a shootout ends WASTED or with a getaway.

@@ -1,3 +1,5 @@
+// SOLARA round 6 — re-witnessed 23 Nov 2026.
+// Role: entrypoint — builds the world, wires systems, runs the loop.
 // main.js — SOLARA, the entrypoint: it builds Coral Bay, wires every system
 // together, runs the game loop, and owns the state machine (menu, play,
 // dialogue, pause, win, lose) plus the save and the screenshot staging.

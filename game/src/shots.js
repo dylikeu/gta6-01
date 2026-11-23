@@ -1,3 +1,5 @@
+// SOLARA round 6 — re-witnessed 23 Nov 2026.
+// Role: the four deterministic ?shot= screenshot scenes.
 // shots.js — the four screenshot scenes behind ?shot=cover|street|mission|
 // combat. Each one stages the real game from a fresh world with a fixed
 // seed, steps the simulation a fixed number of frames, and parks the camera

@@ -1,3 +1,5 @@
+// SOLARA round 6 — re-witnessed 23 Nov 2026.
+// Role: Coral Bay's world — sky, sea, roads, buildings, palms, collisions.
 // buildCity — Coral Bay itself: the sunset sky, the sea and beach, the road
 // grid, the low-poly coloured buildings, the palms on Ocean Drive, the pier,
 // street lights and every collision box the cars and the player bump into.

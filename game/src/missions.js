@@ -1,3 +1,5 @@
+// SOLARA round 6 — re-witnessed 23 Nov 2026.
+// Role: the eight story jobs for Marisol Vega and their paydays.
 // missions.js — the story of Dante Cruz: eight jobs for Marisol Vega, from
 // stealing his first wheels to taking the Vega Mansion. Each job carries
 // its briefing dialogue, its objective, and its payday, and the runner
