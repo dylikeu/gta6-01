@@ -1,204 +1,233 @@
-// The whole 2D HUD: wanted stars, cash, health/armor, weapon slot, radio, mission
-// objective, minimap, dialog box with character portraits, prompts and banners.
-// Plain DOM over the WebGL canvas, so it stays crisp at contact-sheet size.
-import { CITY, RADIO } from './config.js';
+// hud.js — everything on top of the 3D view: the wanted stars, the money,
+// the health and armour bars, the weapon slot, the radio ticker, the
+// mission objective, the portrait dialogue box, the live minimap, and the
+// title, pause, win and lose screens.
+import { AVENUES, RADIO_STATIONS, STREETS, WORLD_HALF, moneyString } from './config.js';
 
-// Tiny inline-SVG portraits (drawn, not loaded) — one face per story character.
-export function portraitSVG(name, color) {
-  const hair = name === 'Luna' ? 'M18 14 q-14 -4 -12 14 l4 2 q-2 -12 8 -12 q10 0 8 12 l4 -2 q2 -18 -12 -14' : 'M20 12 q-12 -2 -12 8 l3 1 q0 -6 9 -6 q9 0 9 6 l3 -1 q0 -10 -12 -8';
-  const face = {
-    Rico: '#c68e5f', Dante: '#c68e5f', Luna: '#f1c27d', 'Mr. Vane': '#e0ac69',
-  }[name] || '#c68e5f';
-  return `<svg viewBox="0 0 64 64" width="64" height="64" xmlns="http://www.w3.org/2000/svg">
-    <rect width="64" height="64" fill="${color}"/>
-    <circle cx="32" cy="26" r="10" fill="${face}"/>
-    <path d="${hair}" fill="#1d1a16"/>
-    <circle cx="28" cy="25" r="1.6" fill="#1d1a16"/><circle cx="36" cy="25" r="1.6" fill="#1d1a16"/>
-    <path d="M28 32 q4 3 8 0" stroke="#7a4a2b" stroke-width="1.6" fill="none"/>
-    <path d="M20 44 q12 -6 24 0 l2 20 l-28 0 z" fill="#2b2d42"/>
-    <rect x="28" y="46" width="8" height="4" fill="#ffd60a"/>
-  </svg>`;
+export const STATION_SONGS = RADIO_STATIONS;
+
+/** Build the whole HUD inside `root` and return handles to update it. */
+export function createHud(root) {
+  root.innerHTML = `
+    <div id="hud" class="hidden">
+      <div id="top-left">
+        <div id="stars" aria-label="Wanted level"></div>
+        <div id="money">$0</div>
+        <div id="mission-name"></div>
+      </div>
+      <div id="top-right"><canvas id="minimap" width="220" height="220"></canvas></div>
+      <div id="objective"></div>
+      <div id="toasts"></div>
+      <div id="bottom-left">
+        <div class="bar-label">HEALTH</div>
+        <div class="bar"><div id="health-fill"></div></div>
+        <div class="bar-label">ARMOR</div>
+        <div class="bar"><div id="armor-fill"></div></div>
+      </div>
+      <div id="bottom-right">
+        <div id="weapon">PISTOL · 12 / ∞</div>
+        <div id="radio">SOLARA FM 88.1 — Neon Palms</div>
+        <div id="hint">E enter car · Q rob · T radio</div>
+      </div>
+      <div id="crosshair">+</div>
+      <div id="dialogue" class="hidden">
+        <div id="portrait">MV</div>
+        <div id="dialogue-body"><div id="dialogue-name"></div><div id="dialogue-text"></div><div id="dialogue-next">E ▸ continue</div></div>
+      </div>
+      <div id="center-banner" class="hidden"></div>
+    </div>
+    <div id="menu" class="screen">
+      <div class="title-block">
+        <div class="kicker">CORAL BAY · SUNSET · OPEN WORLD</div>
+        <h1>SOLARA</h1>
+        <div class="subtitle">— Streets of Coral Bay —</div>
+        <p class="tagline">Dante Cruz is back in town. Steal cars, outrun the Coral Bay PD, and take all eight jobs from Marisol Vega.</p>
+        <div class="menu-buttons">
+          <button id="btn-start">▶ START STORY</button>
+          <button id="btn-continue" class="hidden">↻ CONTINUE</button>
+          <button id="btn-freeroam">☀ FREE ROAM</button>
+        </div>
+        <p class="controls">WASD move / drive · SHIFT sprint · E enter or exit car · SPACE or CLICK shoot · Q rob · R reload · T radio · M mission · P pause</p>
+        <p class="fineprint">An original open-world crime game. Its city, characters, vehicles, story, art and music are all its own.</p>
+      </div>
+    </div>
+    <div id="pause" class="screen hidden">
+      <h2>PAUSED</h2>
+      <p>Coral Bay waits for no one — except right now.</p>
+      <div class="menu-buttons"><button id="btn-resume">▶ RESUME</button><button id="btn-quit">■ QUIT TO MENU</button></div>
+    </div>
+    <div id="end" class="screen hidden">
+      <h2 id="end-title">WASTED</h2>
+      <p id="end-text"></p>
+      <div id="end-stats"></div>
+      <div class="menu-buttons"><button id="btn-again">↻ PLAY AGAIN</button><button id="btn-menu">■ MAIN MENU</button></div>
+    </div>`;
+  return {
+    root,
+    hud: root.querySelector('#hud'),
+    stars: root.querySelector('#stars'),
+    money: root.querySelector('#money'),
+    missionName: root.querySelector('#mission-name'),
+    minimap: root.querySelector('#minimap'),
+    objective: root.querySelector('#objective'),
+    toasts: root.querySelector('#toasts'),
+    healthFill: root.querySelector('#health-fill'),
+    armorFill: root.querySelector('#armor-fill'),
+    weapon: root.querySelector('#weapon'),
+    radio: root.querySelector('#radio'),
+    hint: root.querySelector('#hint'),
+    crosshair: root.querySelector('#crosshair'),
+    dialogue: root.querySelector('#dialogue'),
+    portrait: root.querySelector('#portrait'),
+    dialogueName: root.querySelector('#dialogue-name'),
+    dialogueText: root.querySelector('#dialogue-text'),
+    centerBanner: root.querySelector('#center-banner'),
+    menu: root.querySelector('#menu'),
+    pause: root.querySelector('#pause'),
+    end: root.querySelector('#end'),
+    endTitle: root.querySelector('#end-title'),
+    endText: root.querySelector('#end-text'),
+    endStats: root.querySelector('#end-stats'),
+  };
 }
 
-export function createHud() {
-  const hud = document.getElementById('hud');
-  const el = {};
-  el.stars = document.getElementById('hud-stars');
-  el.money = document.getElementById('hud-money');
-  el.healthFill = document.getElementById('hud-health-fill');
-  el.armorFill = document.getElementById('hud-armor-fill');
-  el.healthText = document.getElementById('hud-health-text');
-  el.weapon = document.getElementById('hud-weapon');
-  el.radio = document.getElementById('hud-radio');
-  el.speed = document.getElementById('hud-speed');
-  el.objective = document.getElementById('hud-objective');
-  el.objectiveTitle = document.getElementById('hud-objective-title');
-  el.objectiveDist = document.getElementById('hud-objective-dist');
-  el.minimap = document.getElementById('hud-minimap');
-  el.minimapCtx = el.minimap.getContext('2d');
-  el.dialog = document.getElementById('hud-dialog');
-  el.dialogPortrait = document.getElementById('hud-dialog-portrait');
-  el.dialogName = document.getElementById('hud-dialog-name');
-  el.dialogText = document.getElementById('hud-dialog-text');
-  el.prompt = document.getElementById('hud-prompt');
-  el.banner = document.getElementById('hud-banner');
-  el.bannerTitle = document.getElementById('hud-banner-title');
-  el.bannerSub = document.getElementById('hud-banner-sub');
-  el.center = document.getElementById('hud-center');
-  el.crosshair = document.getElementById('hud-crosshair');
-  return { root: hud, ...el };
-}
-
-function starRow(wanted) {
-  let out = '';
+/** Render the wanted stars: filled gold stars for the heat, dim for the rest. */
+export function renderStars(hud, level) {
+  let html = '';
   for (let i = 0; i < 5; i += 1) {
-    out += `<span class="star ${i < wanted ? 'on' : ''}">★</span>`;
+    html += `<span class="star${i < level ? ' lit' : ''}">★</span>`;
   }
-  return out;
+  hud.stars.innerHTML = html;
 }
 
-export function updateHud(state, hud) {
-  const player = state.player;
-  hud.stars.innerHTML = starRow(player.wanted);
-  hud.money.textContent = `$${player.money.toLocaleString('en-US')}`;
-  hud.healthFill.style.width = `${player.health}%`;
-  hud.armorFill.style.width = `${player.armor}%`;
-  hud.healthText.textContent = `${Math.ceil(player.health)}`;
-  hud.weapon.textContent = player.weapon === 'pistol' ? 'PISTOL  ∞' : 'FISTS';
-  const station = RADIO[state.radio.station];
-  hud.radio.innerHTML = `<b>${station.name}</b> — ${station.song}`;
-  hud.speed.textContent = !player.onFoot && player.car
-    ? `${Math.round(Math.abs(player.car.speed) * 2.237)} mph` : '';
-  hud.speed.style.display = (!player.onFoot && player.car) ? 'block' : 'none';
-
-  // Objective panel (top-left).
-  const mission = state.missions.active;
-  if (mission) {
-    hud.objective.style.display = 'block';
-    hud.objectiveTitle.textContent = `${mission.def.id}. ${mission.def.title}`;
-    const count = mission.def.kind === 'eliminate'
-      ? `  (${mission.count}/${mission.target})` : '';
-    hud.objectiveDist.textContent = `${state.missions.objectiveText}${count}`;
-  } else if (state.missions.completed >= 8) {
-    hud.objective.style.display = 'block';
-    hud.objectiveTitle.textContent = 'KING OF CORAL BAY';
-    hud.objectiveDist.textContent = 'Story complete — free roam!';
-  } else {
-    hud.objective.style.display = 'none';
-  }
-
-  // Dialog box.
-  const dialog = state.missions.dialog;
-  if (dialog) {
-    const [speaker, text] = dialog.lines[dialog.lineIndex];
-    hud.dialog.style.display = 'flex';
-    const color = { Rico: '#e63946', Dante: '#2ec4b6', Luna: '#f7b801', 'Mr. Vane': '#4361ee' }[speaker] || '#888';
-    hud.dialogPortrait.innerHTML = portraitSVG(speaker, color);
-    hud.dialogName.textContent = speaker;
-    hud.dialogName.style.color = color;
-    hud.dialogText.textContent = text;
-  } else {
-    hud.dialog.style.display = 'none';
-  }
-
-  // Banner (mission complete etc.).
-  const banner = state.missions.banner;
-  if (banner && state.time < banner.until) {
-    hud.banner.style.display = 'block';
-    hud.bannerTitle.textContent = banner.text;
-    hud.bannerSub.textContent = banner.sub;
-  } else {
-    hud.banner.style.display = 'none';
-  }
-
-  // Context prompt (enter car, etc.).
-  hud.prompt.textContent = state.promptText || '';
-  hud.prompt.style.display = state.promptText ? 'block' : 'none';
-
-  // Crosshair only when on foot with the pistol out (never in staged shots).
-  hud.crosshair.style.display = (player.onFoot && player.weapon === 'pistol' && state.screen === 'play' && !state.shotMode) ? 'block' : 'none';
-
-  drawMinimap(state, hud);
+/** Update every live HUD value from the game state, once a frame. */
+export function updateHud(hud, game) {
+  renderStars(hud, game.wanted.level);
+  hud.money.textContent = moneyString(game.money);
+  hud.missionName.textContent = game.missionRunner.mission ? `JOB ${game.missionRunner.index + 1}/8 — ${game.missionRunner.mission.name}` : 'FREE ROAM · CORAL BAY';
+  hud.objective.textContent = '◎ ' + game.missionRunner.objectiveLabel();
+  hud.healthFill.style.width = Math.max(0, game.player.health) + '%';
+  hud.armorFill.style.width = Math.max(0, game.player.armor) + '%';
+  const pistol = game.pistol;
+  hud.weapon.textContent = pistol.reloading > 0 ? 'PISTOL · RELOADING…' : `PISTOL · ${pistol.ammo} / ∞`;
+  const station = RADIO_STATIONS[game.radioStation];
+  hud.radio.textContent = `${station.name} — ${station.song}`;
+  hud.hint.textContent = game.player.inCar ? 'E exit car · SPACE handbrake · T radio' : 'E enter car · Q rob · SPACE shoot · T radio';
+  hud.crosshair.style.display = game.player.inCar ? 'none' : 'block';
+  drawMinimap(hud.minimap, game);
 }
 
-function drawMinimap(state, hud) {
-  const ctx = hud.minimapCtx;
-  const S = 190;
-  const scale = S / (CITY.maxCoord * 2 + 80);
-  const toMap = (x, z) => [S / 2 + x * scale, S / 2 + z * scale];
-  ctx.clearRect(0, 0, S, S);
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(S / 2, S / 2, S / 2 - 2, 0, Math.PI * 2);
-  ctx.clip();
-  // Ocean (west) and land.
-  ctx.fillStyle = '#1e6f8e';
-  ctx.fillRect(0, 0, S, S);
-  const [beachX] = toMap(CITY.beachX, 0);
-  ctx.fillStyle = '#3f7d4e';
-  ctx.fillRect(beachX, 0, S - beachX, S);
+/** Draw the minimap: sea, sand, roads, traffic, police, the player, the marker. */
+export function drawMinimap(canvas, game) {
+  const ctx = canvas.getContext('2d');
+  const size = canvas.width;
+  const scale = size / (WORLD_HALF * 2 + 40);
+  const toMap = (x, z) => [(x + WORLD_HALF + 20) * scale, (z + WORLD_HALF + 20) * scale];
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = 'rgba(8, 20, 34, 0.88)';
+  ctx.fillRect(0, 0, size, size);
+  // Sea and sand at the top (north is -Z).
+  const [, seaY] = toMap(0, -170);
+  ctx.fillStyle = '#1d7f8e';
+  ctx.fillRect(0, 0, size, seaY);
   ctx.fillStyle = '#e8c98f';
-  ctx.fillRect(beachX - 6, 0, 6, S);
+  ctx.fillRect(0, seaY, size, toMap(0, -150)[1] - seaY);
   // Roads.
-  ctx.strokeStyle = '#33323e';
-  ctx.lineWidth = 4;
-  for (let c = -CITY.halfSize; c <= CITY.halfSize; c += CITY.block + CITY.road) {
-    const [x] = toMap(c, 0);
-    const [, z] = toMap(0, c);
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, S); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, z); ctx.lineTo(S, z); ctx.stroke();
-  }
-  // Objective marker (yellow diamond).
-  if (state.missions.objectivePos) {
-    const [ox, oz] = toMap(state.missions.objectivePos.x, state.missions.objectivePos.z);
-    ctx.fillStyle = '#ffd60a';
+  ctx.strokeStyle = '#8a8f9e';
+  ctx.lineWidth = 3;
+  for (const z of AVENUES) {
+    const [, y] = toMap(0, z);
     ctx.beginPath();
-    ctx.moveTo(ox, oz - 7); ctx.lineTo(ox + 6, oz); ctx.lineTo(ox, oz + 7); ctx.lineTo(ox - 6, oz);
-    ctx.closePath(); ctx.fill();
-    ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.moveTo(0, y);
+    ctx.lineTo(size, y);
+    ctx.stroke();
   }
-  // Police (red), traffic (white), enemies (purple).
-  for (const car of state.cars) {
-    if (car.kind === 'player') continue;
-    const [cx, cz] = toMap(car.pos.x, car.pos.z);
-    ctx.fillStyle = car.kind === 'police' ? '#ff2e2e' : '#ffffff';
-    ctx.beginPath(); ctx.arc(cx, cz, car.kind === 'police' ? 4 : 2.5, 0, Math.PI * 2); ctx.fill();
+  for (const x of STREETS) {
+    const [mx] = toMap(x, 0);
+    ctx.beginPath();
+    ctx.moveTo(mx, 0);
+    ctx.lineTo(mx, size);
+    ctx.stroke();
   }
-  for (const e of state.enemies || []) {
-    if (!e.alive) continue;
-    const [ex, ez] = toMap(e.pos.x, e.pos.z);
-    ctx.fillStyle = '#c77dff';
-    ctx.fillRect(ex - 3, ez - 3, 6, 6);
+  // Objective marker: a pulsing pink diamond.
+  const runner = game.missionRunner;
+  if (runner.markerPos) {
+    const [mx, my] = toMap(runner.markerPos.x, runner.markerPos.z);
+    const pulse = 5 + Math.sin(game.time * 5) * 2;
+    ctx.fillStyle = '#ff4d8d';
+    ctx.beginPath();
+    ctx.moveTo(mx, my - pulse - 3);
+    ctx.lineTo(mx + pulse, my);
+    ctx.lineTo(mx, my + pulse + 3);
+    ctx.lineTo(mx - pulse, my);
+    ctx.closePath();
+    ctx.fill();
   }
-  // Player arrow (centre-ish, points along heading).
-  const player = state.player;
-  const [px, py] = toMap(player.pos.x, player.pos.z);
-  ctx.save();
-  ctx.translate(px, py);
-  ctx.rotate(Math.atan2(Math.sin(player.heading), Math.cos(player.heading)) + Math.PI);
-  ctx.fillStyle = '#2ec4b6';
-  ctx.strokeStyle = '#fff';
+  // Traffic: small yellow dots. Police: flashing blue.
+  for (const car of game.trafficCars) {
+    const [mx, my] = toMap(car.mesh.position.x, car.mesh.position.z);
+    ctx.fillStyle = '#ffd166';
+    ctx.fillRect(mx - 1.5, my - 1.5, 3, 3);
+  }
+  const flash = Math.sin(game.time * 9) > 0;
+  for (const car of game.policeCars) {
+    const [mx, my] = toMap(car.mesh.position.x, car.mesh.position.z);
+    ctx.fillStyle = flash ? '#ff2a2a' : '#3a6bff';
+    ctx.beginPath();
+    ctx.arc(mx, my, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // The player: a white arrow pointing where Dante faces.
+  const [px, py] = toMap(game.player.x, game.player.z);
+  const heading = game.player.inCar ? game.player.inCar.heading : game.player.heading;
+  ctx.fillStyle = '#ffffff';
+  ctx.strokeStyle = '#111111';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.moveTo(0, -8); ctx.lineTo(6, 6); ctx.lineTo(0, 3); ctx.lineTo(-6, 6);
-  ctx.closePath(); ctx.fill(); ctx.stroke();
-  ctx.restore();
-  ctx.restore();
-  // Ring.
-  ctx.strokeStyle = 'rgba(255,255,255,0.85)';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.arc(S / 2, S / 2, S / 2 - 2, 0, Math.PI * 2);
+  ctx.moveTo(px + Math.sin(heading) * 8, py + Math.cos(heading) * 8);
+  ctx.lineTo(px + Math.sin(heading + 2.5) * 6, py + Math.cos(heading + 2.5) * 6);
+  ctx.lineTo(px + Math.sin(heading - 2.5) * 6, py + Math.cos(heading - 2.5) * 6);
+  ctx.closePath();
+  ctx.fill();
   ctx.stroke();
 }
 
-// Big centre-screen text: WASTED / BUSTED / story complete.
-export function showCenter(hud, title, sub, color) {
-  hud.center.style.display = 'block';
-  hud.center.innerHTML = `<div class="center-title" style="color:${color}">${title}</div><div class="center-sub">${sub}</div>`;
+/** Show a portrait dialogue line, or hide the box when `line` is null. */
+export function showDialogue(hud, line, mission) {
+  if (!line) {
+    hud.dialogue.classList.add('hidden');
+    return;
+  }
+  hud.dialogue.classList.remove('hidden');
+  hud.dialogueName.textContent = line.speaker;
+  hud.dialogueText.textContent = line.text;
+  const initials = line.speaker.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+  hud.portrait.textContent = initials;
+  hud.portrait.style.background = mission && mission.color ? mission.color : '#e63b2e';
 }
 
-export function hideCenter(hud) {
-  hud.center.style.display = 'none';
-  hud.center.innerHTML = '';
+/** A short toast message above the objective, fading after a few seconds. */
+export function toast(hud, text, kind = '') {
+  const el = document.createElement('div');
+  el.className = 'toast ' + kind;
+  el.textContent = text;
+  hud.toasts.appendChild(el);
+  window.setTimeout(() => el.remove(), 4200);
+  while (hud.toasts.children.length > 3) hud.toasts.firstChild.remove();
+}
+
+/** A big centre-screen banner, e.g. MISSION COMPLETE +$3,000. */
+export function banner(hud, title, sub = '') {
+  hud.centerBanner.innerHTML = `<div class="banner-title">${title}</div><div class="banner-sub">${sub}</div>`;
+  hud.centerBanner.classList.remove('hidden');
+  window.clearTimeout(banner._t);
+  banner._t = window.setTimeout(() => hud.centerBanner.classList.add('hidden'), 3200);
+}
+
+/** Show one screen (menu / pause / end) and hide the HUD, or the reverse. */
+export function showScreen(hud, name) {
+  hud.menu.classList.toggle('hidden', name !== 'menu');
+  hud.pause.classList.toggle('hidden', name !== 'pause');
+  hud.end.classList.toggle('hidden', name !== 'end');
+  hud.hud.classList.toggle('hidden', name !== 'play');
 }

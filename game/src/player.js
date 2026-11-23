@@ -1,132 +1,137 @@
-// Dante on foot: WASD movement relative to the camera, sprint, entering and
-// leaving cars (stealing a traffic car raises the wanted level), and the aim pose.
-import { PLAYER } from './config.js';
-import { addWanted } from './state.js';
-import { collideCircle, clampToWorld } from './city.js';
-import { nearestCar } from './traffic.js';
-import { animateIdle, animateWalk } from './characters.js';
-import { makeCar, SPORTS_COLORS } from './vehicles.js';
+// player.js — Dante Cruz on foot: the low-poly hero, his walk/run, the
+// enter-and-exit-car dance, and the health and armour that decide whether
+// a shootout ends WASTED or with a getaway.
+import * as THREE from 'three';
+import { PLAYER, angleDelta, clamp, dist2d } from './config.js';
+import { resolveCollisions } from './city.js';
+import { createPedestrianMesh } from './pedestrians.js';
 
-// Spawn Dante's mesh and put him at the start spot.
-export function spawnPlayer(scene, state, dante) {
-  state.player.mesh = dante.group;
-  state.player.parts = dante.parts;
-  state.player.gun = dante.gun;
-  dante.group.position.set(state.player.pos.x, 0, state.player.pos.z);
-  dante.group.rotation.y = state.player.heading;
-  scene.add(dante.group);
-  return dante;
+/** Build Dante: a coral-red jacket, dark jeans, a head that turns. */
+export function createPlayerMesh() {
+  const group = createPedestrianMesh(7);
+  group.traverse((child) => {
+    if (child.isMesh && child.geometry && child.geometry.parameters && child.geometry.parameters.width === 0.62) {
+      child.material = new THREE.MeshStandardMaterial({ color: 0xe63b2e, roughness: 0.85 });
+    }
+  });
+  // A pistol in his right hand, visible when he is armed.
+  const gun = new THREE.Group();
+  const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.07, 0.09), new THREE.MeshStandardMaterial({ color: 0x14161c, roughness: 0.4, metalness: 0.6 }));
+  gun.add(barrel);
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.2, 0.08), new THREE.MeshStandardMaterial({ color: 0x3a2a1a, roughness: 0.9 }));
+  grip.position.set(-0.1, -0.09, 0);
+  gun.add(grip);
+  gun.position.set(0.4, 1.05, 0.25);
+  gun.rotation.y = Math.PI / 2;
+  group.add(gun);
+  group.userData.gun = gun;
+  return group;
 }
 
-// A fresh drivable car for the player (used at mission starts and free roam).
-export function givePlayerCar(scene, state, color, kind = 'player', x = null, z = null, heading = null) {
-  const { group, wheels, lightBarL, lightBarR } = makeCar(color, kind);
-  const px = x ?? state.player.pos.x + 4;
-  const pz = z ?? state.player.pos.z + 2;
-  group.position.set(px, 0, pz);
-  group.rotation.y = heading ?? state.player.heading;
-  scene.add(group);
-  const car = {
-    mesh: group, wheels, lightBarL, lightBarR, kind,
-    pos: group.position, heading: group.rotation.y, speed: 0,
-    cruiseSpeed: 0, color, route: null, routeIndex: 0,
+/** The on-foot state: position, heading, health, armour, speed. */
+export function createPlayerState(x, z) {
+  return {
+    mesh: null,
+    x,
+    z,
+    heading: Math.PI,
+    speed: 0,
+    health: PLAYER.maxHealth,
+    armor: 0,
+    inCar: null,
+    moving: false,
+    walkPhase: 0,
   };
-  state.cars.push(car);
+}
+
+/**
+ * Move Dante on foot: WASD relative to the camera, SHIFT to sprint, and
+ * bump him out of buildings. Returns true while he is actually moving.
+ */
+export function updatePlayerOnFoot(player, input, cameraHeading, dt, colliders) {
+  const forward = (input.keys.has('KeyW') ? 1 : 0) - (input.keys.has('KeyS') ? 1 : 0);
+  const strafe = (input.keys.has('KeyD') ? 1 : 0) - (input.keys.has('KeyA') ? 1 : 0);
+  const sprint = input.keys.has('ShiftLeft') || input.keys.has('ShiftRight');
+  const top = sprint ? PLAYER.runSpeed : PLAYER.walkSpeed;
+  const len = Math.hypot(forward, strafe);
+  player.moving = len > 0;
+  if (len > 0) {
+    const fx = forward / len;
+    const sx = strafe / len;
+    const sin = Math.sin(cameraHeading);
+    const cos = Math.cos(cameraHeading);
+    const mx = (fx * sin - sx * cos) * top;
+    const mz = (fx * cos + sx * sin) * top;
+    const pos = { x: player.x + mx * dt, z: player.z + mz * dt };
+    resolveCollisions(pos, PLAYER.radius, colliders);
+    player.x = pos.x;
+    player.z = pos.z;
+    player.speed = top;
+    // Turn smoothly toward where Dante is going, so strafing steers him
+    // instead of snapping his facing forty-five degrees a frame.
+    const targetHeading = Math.atan2(mx, mz);
+    player.heading += clamp(angleDelta(player.heading, targetHeading), -3.5 * dt, 3.5 * dt);
+  } else {
+    player.speed = 0;
+  }
+  player.mesh.position.set(player.x, 0, player.z);
+  player.mesh.rotation.y = player.heading;
+  player.walkPhase += dt * (player.moving ? (sprint ? 12 : 8) : 0);
+  const swing = Math.sin(player.walkPhase) * (player.moving ? 0.6 : 0);
+  player.mesh.userData.legs[0].rotation.x = swing;
+  player.mesh.userData.legs[1].rotation.x = -swing;
+  player.mesh.userData.arms[0].rotation.x = -swing * 0.8;
+  player.mesh.userData.arms[1].rotation.x = swing * 0.8;
+  return player.moving;
+}
+
+/** Damage Dante: armour soaks it first, then health. Returns true if he died. */
+export function damagePlayer(player, amount) {
+  let left = amount;
+  if (player.armor > 0) {
+    const soaked = Math.min(player.armor, left);
+    player.armor -= soaked;
+    left -= soaked;
+  }
+  player.health -= left;
+  return player.health <= 0;
+}
+
+/** The nearest car (parked, traffic or police) Dante can climb into. */
+export function nearestEnterableCar(cars, x, z, radius = 4) {
+  let best = null;
+  let bestD = radius;
+  for (const car of cars) {
+    if (car.destroyed) continue;
+    const d = dist2d(car.mesh.position.x, car.mesh.position.z, x, z);
+    if (d < bestD) {
+      bestD = d;
+      best = car;
+    }
+  }
+  return best;
+}
+
+/** Put Dante into a car: hide his mesh and hand the car to the driver. */
+export function enterCar(player, car) {
+  player.inCar = car;
+  player.mesh.visible = false;
+  car.driver = player;
+  car.stolen = true;
   return car;
 }
 
-export function enterCar(state, car) {
-  const player = state.player;
-  if (!player.onFoot || !car) return false;
-  if (car.kind === 'traffic') {
-    // Stealing a stranger's car: the driver flees, the cops notice.
-    addWanted(state, 1);
-    state.stats.carsStolen += 1;
-    if (state.onCrime) state.onCrime('steal');
-  }
-  player.onFoot = false;
-  player.car = car;
-  car.kind = 'player';
+/** Drop Dante out beside the car, on the side away from traffic. */
+export function exitCar(player) {
+  const car = player.inCar;
+  if (!car) return null;
+  player.inCar = null;
+  car.driver = null;
   car.speed = 0;
-  player.mesh.visible = false;
-  return true;
-}
-
-export function exitCar(state) {
-  const player = state.player;
-  if (player.onFoot || !player.car) return false;
-  const car = player.car;
-  player.onFoot = true;
-  player.car = null;
+  const side = Math.cos(car.heading) >= 0 ? 1 : -1;
+  player.x = car.mesh.position.x + Math.cos(car.heading + Math.PI / 2) * 2.2 * side;
+  player.z = car.mesh.position.z - Math.sin(car.heading + Math.PI / 2) * 2.2 * side;
+  player.mesh.position.set(player.x, 0, player.z);
   player.mesh.visible = true;
-  // Step out to the left of the car.
-  const sideX = car.pos.x + Math.cos(car.heading) * -2.2;
-  const sideZ = car.pos.z - Math.sin(car.heading) * -2.2;
-  player.pos.x = sideX;
-  player.pos.z = sideZ;
-  player.heading = car.heading;
-  player.mesh.position.set(sideX, 0, sideZ);
-  player.mesh.rotation.y = car.heading;
-  car.speed = 0;
-  return true;
-}
-
-// Try to enter the nearest car; returns a status string for the prompt line.
-export function tryEnterCar(state) {
-  const player = state.player;
-  const car = nearestCar(state, player.pos.x, player.pos.z, 4.5);
-  if (!car) return 'no-car';
-  const wasTraffic = car.kind === 'traffic';
-  enterCar(state, car);
-  return wasTraffic ? 'stolen' : 'entered';
-}
-
-export function updatePlayerOnFoot(state, input, dt, cameraYaw) {
-  const player = state.player;
-  if (!player.onFoot) return;
-  const fwd = (input.keys.has('KeyW') || input.keys.has('ArrowUp') ? 1 : 0)
-    - (input.keys.has('KeyS') || input.keys.has('ArrowDown') ? 1 : 0);
-  const strafe = (input.keys.has('KeyD') || input.keys.has('ArrowRight') ? 1 : 0)
-    - (input.keys.has('KeyA') || input.keys.has('ArrowLeft') ? 1 : 0);
-  player.running = input.keys.has('ShiftLeft') || input.keys.has('ShiftRight');
-  const speed = player.running ? PLAYER.runSpeed : PLAYER.walkSpeed;
-  const moving = fwd !== 0 || strafe !== 0;
-  player.moving = moving;
-  if (moving) {
-    // Movement is relative to the camera yaw: W walks away from the camera, D
-    // strafes to the screen-right (camera right is (-cos yaw, sin yaw)).
-    const moveAngle = cameraYaw + Math.atan2(-strafe, fwd);
-    const targetHeading = moveAngle;
-    let diff = targetHeading - player.heading;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    player.heading += Math.max(-PLAYER.turnSpeed * dt, Math.min(PLAYER.turnSpeed * dt, diff));
-    player.pos.x += Math.sin(player.heading) * speed * dt;
-    player.pos.z += Math.cos(player.heading) * speed * dt;
-    player.walkPhase += speed * dt * 2.6;
-  }
-  const fixed = collideCircle(state, player.pos.x, player.pos.z, PLAYER.radius);
-  player.pos.x = fixed.x;
-  player.pos.z = fixed.z;
-  const clamped = clampToWorld(player.pos.x, player.pos.z);
-  player.pos.x = clamped.x;
-  player.pos.z = clamped.z;
-  player.mesh.position.set(player.pos.x, 0, player.pos.z);
-  player.mesh.rotation.y = player.heading;
-  if (moving) animateWalk(player.parts, player.walkPhase, player.running ? 0.7 : 0.5);
-  else animateIdle(player.parts, state.time);
-  player.gun.visible = player.weapon === 'pistol';
-  // Aim pose: face the camera yaw while shooting.
-  if (player.shooting) {
-    player.mesh.rotation.y = cameraYaw;
-    player.parts.armR.rotation.x = -Math.PI / 2 + 0.2;
-    player.parts.armL.rotation.x = -Math.PI / 2 + 0.2;
-  }
-}
-
-export function spawnSportsCarNearby(scene, state) {
-  const rng = Math.random;
-  const color = SPORTS_COLORS[Math.floor(rng() * SPORTS_COLORS.length)];
-  return givePlayerCar(scene, state, color, 'sports',
-    state.player.pos.x + 6, state.player.pos.z - 4, state.player.heading + 0.6);
+  return car;
 }
